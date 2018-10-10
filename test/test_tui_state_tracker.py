@@ -12,7 +12,7 @@ from datui.tui_state_tracker import TuiStateTracker
 
 class TestTuiState(unittest.TestCase):
 
-    def test_update_state(self):
+    def test_update_block_state(self):
         tui = TuiStateTracker()
         block_state = json.dumps({"x":0.0,"y":0.0, "id":0})
         tui.update_block_state(String(block_state))
@@ -20,10 +20,12 @@ class TestTuiState(unittest.TestCase):
         self.assertEqual(tui.block_state.get('x'),0.0)
         self.assertEqual(tui.block_state.get('y'),0.0)
         self.assertEqual(tui.block_state.get('id'),0)
+
+        tui.shutdown_tracker()
         
 
     def test_get_block_state(self):
-        print("testing get_block_state")
+        #print("testing get_block_state")
         tui = TuiStateTracker()
 
         #test without testing setter
@@ -39,6 +41,7 @@ class TestTuiState(unittest.TestCase):
         #test in tuio frame
         test_block_state = tui.get_block_state(TuiStateRequest("tuio")).tui_state
         self.assertEqual(block_state123,json.loads(test_block_state))
+        tui.shutdown_tracker()
 
 if __name__ == '__main__':
     unittest.main()
