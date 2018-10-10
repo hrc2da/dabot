@@ -56,8 +56,9 @@ find_package(catkin REQUIRED COMPONENTS
 
 ## Generate services in the 'srv' folder
 add_service_files(
-    DIRECTORY srv
-#   FILES
+#    DIRECTORY srv
+   FILES
+   TuiState.srv
 #   Service1.srv
 #   Service2.srv
 )
