@@ -11,4 +11,5 @@ Integration of the JACO2, the DATable, and a DA
 6. Make a src directory and cd into it.
 7. Clone https://github.com/hrc2da/dabot.
 8. Cd back into catkin_ws and catkin_make. Make sure the srv files, etc. get created. Don't forget to `source devel/setup.bash`
-9. You can run `python -m unittest discover <path to the tests directory, e.g. dabot/src/test> -v` to make sure everything is working.
+9. Run the docker image in another terminal and start a ROS master with `roscore`
+10. You can run `python -m unittest discover <path to the tests directory, e.g. dabot/test> -v` in the first terminal to make sure everything is working.
