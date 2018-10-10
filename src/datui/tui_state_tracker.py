@@ -22,6 +22,7 @@ class TuiStateTracker:
         rospy.init_node(node_name, anonymous=False)
         self.block_subscriber = rospy.Subscriber("/blocks", String, self.update_block_state)
         self.get_state_server = rospy.Service("get_tui_blocks", TuiState, self.get_block_state)
+        """CHECK CALIBRATION ON INIT"""
 
     def update_block_state(self, message):
         self.block_state = json.loads(message.data)
@@ -38,6 +39,7 @@ class TuiStateTracker:
         return [self.translate(b) for b in self.block_state]
 
     def translate(self, block):
+        """Configure the translation of a block from tuio space to arm space"""
         #block = eval(block_)
         # x_prop = (self.T_X_MAX-block['x'])/self.T_X_DIST #the proportional distance from the left
         # y_prop = (self.T_Y_MAX-block['y'])/self.T_Y_DIST #the proportional distance from the bottom
