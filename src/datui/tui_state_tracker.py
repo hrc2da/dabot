@@ -29,7 +29,20 @@ class TuiStateTracker:
         else:
             raise ValueError("Must specify whether to retrieve state in tuio or arm frame.")
     def get_arm_frame_state(self):
-        return []
+        return [self.translate(b) for b in self.block_state]
+
+    def translate(self,block):
+		#block = eval(block_)
+		#x_prop = (self.T_X_MAX-block['x'])/self.T_X_DIST #the proportional distance from the left
+		#y_prop = (self.T_Y_MAX-block['y'])/self.T_Y_DIST #the proportional distance from the bottom
+		x_prop,y_prop = self.scaleT2J(block['x'],block['y'])
+		jaco_x = x_prop*self.J_X_DIST + self.J_X_MIN
+		jaco_y = y_prop*self.J_Y_DIST + self.J_Y_MIN
+		return {"x":jaco_x, "y":jaco_y, "id":block['id']}
+    
+    def scaleT2J(self,x,y):
+		return ((self.T_X_MAX-x)/self.T_X_DIST, (self.T_Y_MAX-y)/self.T_Y_DIST)
+
     def shutdown_tracker(self):
         self.get_state_server.shutdown('shutting down tui state service')
         rospy.signal_shutdown("tearing down")
