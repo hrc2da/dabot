@@ -1,3 +1,3 @@
-string frame_of_reference
+string frame_of_reference # tuio, eoss_config, arm
 ---
 string tui_state
