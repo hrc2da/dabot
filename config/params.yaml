@@ -1,0 +1,1 @@
+{ tuio_min_x: 0.09, tuio_min_y: 0.17, tuio_max_x: 0.95, tuio_max_y: 0.8, arm_x_dist: 0.77, arm_y_dist: 0.37 }
