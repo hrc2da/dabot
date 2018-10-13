@@ -1,0 +1,15 @@
+#goal
+geometry_msgs/Point source
+geometry_msgs/Point target
+int32 id 
+float32 source_x_tolerance
+float32 source_y_tolerance
+float32 target_x_tolerance
+float32 target_y_tolerance
+float32 block_size
+---
+#result
+geometry_msgs/Point location #return the location of the moved block
+---
+#feedback
+int8 step #the step number of the move sequence

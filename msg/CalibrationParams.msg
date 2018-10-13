@@ -1,0 +1,2 @@
+float32 arm_x_min
+float32 arm_y_min

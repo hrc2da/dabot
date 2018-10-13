@@ -11,6 +11,8 @@ find_package(catkin REQUIRED COMPONENTS
   roscpp
   rospy
   std_msgs
+  geometry_msgs
+  actionlib_msgs
   message_generation
 )
 
@@ -21,7 +23,7 @@ find_package(catkin REQUIRED COMPONENTS
 ## Uncomment this if the package has a setup.py. This macro ensures
 ## modules and global scripts declared therein get installed
 ## See http://ros.org/doc/api/catkin/html/user_guide/setup_dot_py.html
-# catkin_python_setup()
+ catkin_python_setup()
 
 ################################################
 ## Declare ROS messages, services and actions ##
@@ -48,11 +50,12 @@ find_package(catkin REQUIRED COMPONENTS
 ##   * add every package in MSG_DEP_SET to generate_messages(DEPENDENCIES ...)
 
 ## Generate messages in the 'msg' folder
-# add_message_files(
-#   FILES
+ add_message_files(
+   FILES
+   CalibrationParams.msg
 #   Message1.msg
 #   Message2.msg
-# )
+ )
 
 ## Generate services in the 'srv' folder
 add_service_files(
@@ -64,16 +67,20 @@ add_service_files(
 )
 
 ## Generate actions in the 'action' folder
-# add_action_files(
-#   FILES
+ add_action_files(
+   FILES
 #   Action1.action
 #   Action2.action
-# )
+    Calibrate.action
+    MoveBlock.action
+ )
 
  ## Generate added messages and services with any dependencies listed here
  generate_messages(
    DEPENDENCIES
+   actionlib_msgs
    std_msgs
+   geometry_msgs
  )
 
 ################################################
@@ -109,7 +116,7 @@ catkin_package(
 #  INCLUDE_DIRS include
 #  LIBRARIES dabot
 #  CATKIN_DEPENDS roscpp rospy std_msgs
-#  DEPENDS system_lib
+  DEPENDS actionlib_msgs
 )
 
 ###########
