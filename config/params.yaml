@@ -1,1 +1,13 @@
-{ tuio_min_x: 0.09, tuio_min_y: 0.17, tuio_max_x: 0.95, tuio_max_y: 0.8, arm_x_dist: 0.77, arm_y_dist: 0.37 }
+# orbit boundaries
+ORBITS_MIN: -0.58
+ORBITS_MAX: -0.17
+ORBITS_LEFT: 0.25
+ORBITS_RIGHT: 0.45
+
+# table boundaries
+TUIO_MIN_X: 0.09
+TUIO_MIN_Y: 0.17
+TUIO_MAX_X: 0.95
+TUIO_MAX_Y: 0.8
+ARM_X_DIST: 0.77
+ARM_Y_DIST: 0.37

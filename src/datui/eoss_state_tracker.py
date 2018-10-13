@@ -7,6 +7,7 @@ including in terms of EOSS configuration
 """
 from datui.tui_state_tracker import TuiStateTracker
 from dabot.srv import TuiState, TuiStateResponse
+from dautils import get_ros_param
 import rospy
 
 
@@ -17,19 +18,23 @@ class EossStateTracker(TuiStateTracker):
     orbits = []
 
     def __init__(self):
-        if(rospy.has_param("WORKSPACE_BOUNDS")):
-            self.set_workspace_bounds(rospy.get_param("WORKSPACE_BOUNDS"))
-        else:
-            raise ValueError("Orbit Bounds are not defined. Shutting down...")
+        self.set_workspace_bounds()
         # initialize the parent
         TuiStateTracker.__init__(self, node_name="tui_state")
         self.get_config_server = rospy.Service("get_config_state", TuiState, self.get_config_state)
 
-    def set_workspace_bounds(self, bounds):
-        self.orbits_min = bounds["ORBITS_MIN"]
-        self.orbits_max = bounds["ORBITS_MAX"]
-        self.orbits_left = bounds["ORBITS_LEFT"]
-        self.orbits_right = bounds["ORBITS_RIGHT"]
+    def set_workspace_bounds(self, bounds=None):
+        if bounds is not None:
+            self.orbits_min = bounds["ORBITS_MIN"]
+            self.orbits_max = bounds["ORBITS_MAX"]
+            self.orbits_left = bounds["ORBITS_LEFT"]
+            self.orbits_right = bounds["ORBITS_RIGHT"]
+        else:
+            self.orbits_min = get_ros_param("ORBITS_MIN", "Orbit boundaries must be configured.")
+            self.orbits_max = get_ros_param("ORBITS_MAX", "Orbit boundaries must be configured.")
+            self.orbits_left = get_ros_param("ORBITS_LEFT", "Orbit boundaries must be configured.")
+            self.orbits_right = get_ros_param("ORBITS_RIGHT", "Orbit boundaries must be configured.")
+
         self.orbit_height = (self.orbits_max-self.orbits_min)/self.NUM_ORBITS
         self.orbits = []
         for i in range(self.NUM_ORBITS):
@@ -63,3 +68,8 @@ class EossStateTracker(TuiStateTracker):
     def shutdown_tracker(self):
         self.get_config_server.shutdown()
         TuiStateTracker.shutdown_tracker(self)
+
+
+if __name__ == '__main__':
+    e = EossStateTracker()
+    rospy.spin()
