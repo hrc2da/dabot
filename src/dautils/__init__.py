@@ -10,14 +10,21 @@ def get_ros_param(param, err_msg):
         raise ValueError(err_msg)
 
 
+def is_arm_calibrated():
+    if rospy.has_param('ARM_X_MIN') and rospy.has_param('ARM_Y_MIN'):
+        return True
+    else:
+        return False
+
+
 def get_tuio_bounds():
     tuio_bounds = {}
-    tuio_bounds['min_x'] = get_ros_param('TUIO_MIN_X', 'Tuio bounds must be configured')
-    tuio_bounds['max_x'] = get_ros_param('TUIO_MAX_X', 'Tuio bounds must be configured')
-    tuio_bounds['min_y'] = get_ros_param('TUIO_MIN_Y', 'Tuio bounds must be configured')
-    tuio_bounds['max_y'] = get_ros_param('TUIO_MAX_Y', 'Tuio bounds must be configured')
-    tuio_bounds['x_dist'] = tuio_bounds['max_x'] - tuio_bounds['min_x']
-    tuio_bounds['y_dist'] = tuio_bounds['max_y'] - tuio_bounds['min_y']
+    tuio_bounds['x_min'] = get_ros_param('TUIO_X_MIN', 'Tuio bounds must be configured')
+    tuio_bounds['x_max'] = get_ros_param('TUIO_X_MAX', 'Tuio bounds must be configured')
+    tuio_bounds['y_min'] = get_ros_param('TUIO_Y_MIN', 'Tuio bounds must be configured')
+    tuio_bounds['y_max'] = get_ros_param('TUIO_Y_MAX', 'Tuio bounds must be configured')
+    tuio_bounds['x_dist'] = tuio_bounds['x_max'] - tuio_bounds['x_min']
+    tuio_bounds['y_dist'] = tuio_bounds['y_max'] - tuio_bounds['y_min']
     return tuio_bounds
 
 
@@ -27,6 +34,7 @@ def get_arm_bounds(calibrate=False):
     arm_bounds['y_dist'] = get_ros_param('ARM_Y_DIST', 'Arm reachable range must be configured')
 
     if rospy.has_param('ARM_X_MIN') and rospy.has_param('ARM_Y_MIN'):
+        print("SETTING ARMBOUNDS")
         arm_bounds['x_min'] = rospy.get_param('ARM_X_MIN')
         arm_bounds['y_min'] = rospy.get_param('ARM_Y_MIN')
     elif calibrate is True:
@@ -40,6 +48,7 @@ def get_arm_bounds(calibrate=False):
             raise(e)
     else:
         return arm_bounds
+    print("ok, continuing on...")
     arm_bounds['x_max'] = arm_bounds['x_min'] + arm_bounds['x_dist']
     arm_bounds['y_max'] = arm_bounds['y_min'] + arm_bounds['y_dist']
     return arm_bounds
@@ -69,21 +78,21 @@ def calibrate_arm_status(feedback):
 
 def tuio_to_ratio(x, y, tuio_bounds):
     # scales block coords from table's observable range into 0 to 1 scalar
-    return ((tuio_bounds['max_x']-x)/tuio_bounds['x_dist'], (tuio_bounds['max_y']-y)/tuio_bounds['y_dist'])
+    return ((tuio_bounds['x_max']-x)/tuio_bounds['x_dist'], (tuio_bounds['y_max']-y)/tuio_bounds['y_dist'])
 
 
 def arm_to_ratio(x, y, arm_bounds):
     # scales block coords from arm coords to 0 to 1 scalar
-    return ((arm_bounds['max_x']-x)/arm_bounds['x_dist'], (arm_bounds['max_y']-y)/arm_bounds['y_dist'])
+    return ((arm_bounds['x_max']-x)/arm_bounds['x_dist'], (arm_bounds['y_max']-y)/arm_bounds['y_dist'])
 
 
 def tuio_to_arm(x, y, tuio_bounds, arm_bounds):
     # converts block coords from tuio to arm space
     x_ratio, y_ratio = tuio_to_ratio(x, y, tuio_bounds)
-    return (arm_bounds['min_x']+x_ratio*arm_bounds['x_dist'], arm_bounds['min_y']+y_ratio*arm_bounds['y_dist'])
+    return (arm_bounds['x_min']+x_ratio*arm_bounds['x_dist'], arm_bounds['y_min']+y_ratio*arm_bounds['y_dist'])
 
 
 def arm_to_tuio(x, y, tuio_bounds, arm_bounds):
     # converts block coords from tuio to arm space
     x_ratio, y_ratio = arm_to_ratio(x, y, arm_bounds)
-    return (tuio_bounds['min_x']+x_ratio*tuio_bounds['x_dist'], tuio_bounds['min_y']+y_ratio*tuio_bounds['y_dist'])
+    return (tuio_bounds['x_min']+x_ratio*tuio_bounds['x_dist'], tuio_bounds['y_min']+y_ratio*tuio_bounds['y_dist'])
