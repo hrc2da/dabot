@@ -25,6 +25,7 @@ from kinova_msgs.msg import *
 from kinova_msgs.srv import *
 from moveit_commander import RobotCommander, MoveGroupCommander
 import json
+import numpy as np
 
 
 class DaArmServer:
@@ -32,6 +33,7 @@ class DaArmServer:
     """
     gestures = {}
     grasp_height = 0.1
+    drop_height = 0.2
 
     def __init__(self, num_planning_attempts=10):
         rospy.init_node("daarm_server", anonymous=True)
@@ -51,6 +53,7 @@ class DaArmServer:
     def init_params(self):
         try:
             self.grasp_height = get_ros_param("GRASP_HEIGHT", "Grasp height defaulting to 0.1")
+            self.drop_height = get_ros_param("DROP_HEIGHT", "Drop height defaulting to 0.2")
         except ValueError as e:
             rospy.loginfo(e)
 
@@ -58,6 +61,10 @@ class DaArmServer:
         self.calibration_publisher = rospy.Publisher("/calibration_results", CalibrationParams)
         self.action_belief_publisher = rospy.Publisher("/arm_action_beliefs", String, queue_size=1)
         rospy.sleep(0.5)
+
+    def init_subscribers(self):
+        self.joint_angle_subscriber = rospy.Subscriber(
+            '/j2s7s300_driver/out/joint_angles', JointAngles, self.update_joints)
 
     def init_action_servers(self):
         self.calibration_server = actionlib.SimpleActionServer("calibrate_arm", CalibrateAction, self.calibrate)
@@ -121,6 +128,40 @@ class DaArmServer:
         self.arm.set_named_target("Home")
         self.arm.go()
 
+    def move_fingers(self, finger1_pct, finger2_pct, finger3_pct):
+        finger_max_turn = 6800
+        goal = kinova_msgs.msg.SetFingersPositionGoal()
+        goal.fingers.finger1 = (finger1_pct/100.0)*finger_max_turn
+        goal.fingers.finger2 = (finger2_pct/100.0)*finger_max_turn
+        goal.fingers.finger3 = (finger3_pct/100.0)*finger_max_turn
+
+        self.finger_action_client.send_goal(goal)
+        if self.finger_action_client.wait_for_result(rospy.Duration(5.0)):
+            return self.finger_action_client.get_result()
+        else:
+            self.finger_action_client.cancel_all_goals()
+            rospy.WARN('the gripper action timed-out')
+            return None
+
+    def move_joint_angles(self, angle_set):
+        goal = kinova_msgs.msg.ArmJointAnglesGoal()
+
+        goal.angles.joint1 = angle_set[0]
+        goal.angles.joint2 = angle_set[1]
+        goal.angles.joint3 = angle_set[2]
+        goal.angles.joint4 = angle_set[3]
+        goal.angles.joint5 = angle_set[4]
+        goal.angles.joint6 = angle_set[5]
+        goal.angles.joint7 = angle_set[6]
+
+        self.joint_action_client.send_goal(goal)
+        if self.joint_action_client.wait_for_result(rospy.Duration(20.0)):
+            return self.joint_action_client.get_result()
+        else:
+            print('        the joint angle action timed-out')
+            self.joint_action_client.cancel_all_goals()
+            return None
+
     def handle_move_block(self, message):
         """msg format: {id: int,
                         source: Point {x: float,y: float},
@@ -130,8 +171,11 @@ class DaArmServer:
     def open_gripper(self, delay=0):
         """open the gripper ALL THE WAY, then delay
         """
-        self.gripper.set_named_target("Open")
-        self.gripper.go()
+        if is_simulation is True:
+            self.gripper.set_named_target("Open")
+            self.gripper.go()
+        else:
+            self.move_fingers(50, 50, 50)
         rospy.sleep(delay)
 
     def close_gripper(self, delay=0):
@@ -147,17 +191,31 @@ class DaArmServer:
         # as well as specify the arm or gripper choice
         pass
 
-    def move_arm_to_pose(self, position, orientation, delay=0, waypoints=[], action_server=None):
-        if len(waypoints) < 1:
+    def move_arm_to_pose(self, position, orientation, delay=0, waypoints=[], corrections=1, action_server=None):
+        if len(waypoints) > 0:
+            # this is good for doing gestures
+            plan, fraction = self.arm.compute_cartesian_path(waypoints, eef_step=0.01, jump_threshold=0.0)
+        else:
             p = self.arm.get_current_pose()
-        p.pose.position = position
-        p.pose.orientation = orientation
-        self.arm.set_pose_target(p)
-        plan = self.arm.plan()
+            p.pose.position = position
+            p.pose.orientation = orientation
+            self.arm.set_pose_target(p)
+            plan = self.arm.plan()
         if plan:
+            # get the last pose to correct if desired
+            ptPos = plan.joint_trajectory.points[-1].positions
+            # print "=================================="
+            # print "Last point of the current trajectory: "
+            angle_set = list()
+            for i in range(len(ptPos)):
+                tempPos = ptPos[i]*180/np.pi + int(round((self.joint_angles[i] - ptPos[i]*180/np.pi)/(360)))*360
+                angle_set.append(tempPos)
+
             if action_server:
                 action_server.publish_feedback(CalibrateFeedback("Plan Found"))
             self.arm.execute(plan)
+            if corrections > 0:
+                self.move_joint_angles(angle_set)
             rospy.sleep(delay)
         else:
             if action_server:
@@ -169,6 +227,10 @@ class DaArmServer:
     def get_grasp_orientation(self, position):
         return Quaternion(1, 0, 0, 0)
 
+    def update_joints(self, message, joints):
+        self.joint_angles = [joints.joint1, joints.joint2, joints.joint3,
+                             joints.joint4, joints.joint5, joints.joint6, joints.joint7]
+
     def move_z(self, distance):
         p = self.arm.get_current_pose()
         p.pose.position.z += distance
@@ -177,7 +239,8 @@ class DaArmServer:
     def pick_block(self, location, check_grasp=False, retry_attempts=0, delay=0, action_server=None):
         # go to a spot and pick up a block
         # if check_grasp is true, it will check torque on gripper and retry or fail if not holding
-        p = self.arm.get_current_pose()
+        # open the gripper
+        self.open_gripper()
         position = Point(location.x, location.y, self.grasp_height)
         orientation = self.get_grasp_orientation(position)
         try:
@@ -188,14 +251,27 @@ class DaArmServer:
             action_server.publish_feedback()
 
         if check_grasp is True:
-            for i in range(retry_attempts):
-                self.move_z(0.3)
+            pass  # for now, but we want to check finger torques
+            # for i in range(retry_attempts):
+            #     self.move_z(0.3)
+        self.close_gripper()
+        self.move_z(0.1)
+        rospy.sleep(delay)
 
-    def place_block(self, location, check_grasp=False):
+    def place_block(self, location, check_grasp=False, delay=0, action_server=None):
         # go to a spot an drop a block
         # if check_grasp is true, it will check torque on gripper and fail if not holding a block
-
-        pass
+        position = Point(location.x, location.y, self.drop_height)
+        orientation = self.get_grasp_orientation(position)
+        try:
+            self.move_arm_to_pose(position, orientation, delay=0, action_server=action_server)
+        except Exception as e:
+            raise(e)
+        if action_server:
+            action_server.publish_feedback()
+        self.open_gripper()
+        self.move_z(0.1)
+        self.close_gripper()
 
     def stop_motion(self, home=False):
         # cancel the moveit_trajectory
