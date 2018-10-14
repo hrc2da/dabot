@@ -35,9 +35,7 @@ class DaArmServer:
 
     def __init__(self, num_planning_attempts=10):
         rospy.init_node("daarm_server", anonymous=True)
-        self.calibration_publisher = rospy.Publisher("/calibration_results", CalibrationParams)
-        rospy.wait_for_service('get_tui_blocks')
-        self.get_block_state = rospy.ServiceProxy('get_tui_blocks', TuiState)
+
         self.init_params()
         self.init_publishers()
         self.init_arm()
@@ -57,6 +55,7 @@ class DaArmServer:
             rospy.loginfo(e)
 
     def init_publishers(self):
+        self.calibration_publisher = rospy.Publisher("/calibration_results", CalibrationParams)
         self.action_belief_publisher = rospy.Publisher("/arm_action_beliefs", String, queue_size=1)
         rospy.sleep(0.5)
 
@@ -67,14 +66,29 @@ class DaArmServer:
     def init_action_clients(self):
         # Action Client for joint control
         action_address = '/j2s7s300_driver/joints_action/joint_angles'
-        self.jointActionClient = actionlib.SimpleActionClient(action_address, kinova_msgs.msg.ArmJointAnglesAction)
+        self.joint_action_client = actionlib.SimpleActionClient(action_address, kinova_msgs.msg.ArmJointAnglesAction)
         rospy.loginfo('Waiting for ArmJointAnglesAction server...')
-        self.jointActionClient.wait_for_server()
+        self.joint_action_client.wait_for_server()
         rospy.loginfo('ArmJointAnglesAction Server Connected')
 
+        # Service to move the gripper fingers
+        self.finger_action_client = actionlib.SimpleActionClient(
+            action_address, kinova_msgs.msg.SetFingersPositionAction)
+        self.finger_action_client.wait_for_server()
+
     def init_services(self):
+        is_simulation = None
+        try:
+            is_simulation = get_ros_param("IS_SIMULATION", "")
+        except:
+            is_simulation = False
+
+        if is_simulation is True:
+            # setup alternatives to jaco services for emergency stop, joint control, and finger control
+            pass
         # Service to get TUI State
-        self.tui_state_service = rospy.ServiceProxy('/get_tui_blocks', TuiState)
+        rospy.wait_for_service('get_tui_blocks')
+        self.get_block_state = rospy.ServiceProxy('get_tui_blocks', TuiState)
 
         # Service for homing the arm
         home_arm_service = '/j2s7s300_driver/in/home_arm'
@@ -133,8 +147,9 @@ class DaArmServer:
         # as well as specify the arm or gripper choice
         pass
 
-    def move_arm_to_pose(self, position, orientation, delay=0, action_server=None):
-        p = self.arm.get_current_pose()
+    def move_arm_to_pose(self, position, orientation, delay=0, waypoints=[], action_server=None):
+        if len(waypoints) < 1:
+            p = self.arm.get_current_pose()
         p.pose.position = position
         p.pose.orientation = orientation
         self.arm.set_pose_target(p)
