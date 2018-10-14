@@ -10,6 +10,7 @@ to test out the robot actions
 import rospy
 import actionlib
 from dabot.msg import CalibrateAction, CalibrateGoal
+from dautils import calibrate_arm
 from Tkinter import Tk, Label, Button
 
 
@@ -31,13 +32,14 @@ class DaGui:
         pass
 
     def init_action_clients(self):
-        self.calibration_client = actionlib.SimpleActionClient("calibrate_arm", CalibrateAction)
+        self.calibration_client = actionlib.SimpleActionClient('calibrate_arm', CalibrateAction)
 
     def init_subscribers(self):
         pass
 
-    def call_calibrate(self):
-        self.calibration_client.wait_for_server(timeout=rospy.Duration(5))
+    def calibrate_arm(self):
+        # client = actionlib.SimpleActionClient('calibrate_arm', CalibrateAction)
+        self.calibration_client.wait_for_server()
         goal = CalibrateGoal("calibrate_arm")
         self.calibration_client.send_goal(goal)
         self.calibration_client.wait_for_result()
@@ -46,7 +48,7 @@ class DaGui:
     def define_buttons(self):
         self.label = Label(self.master, text="Calibrate the robot")
         self.label.pack()
-        self.greet_button = Button(self.master, text="Calibrate", command=self.call_calibrate)
+        self.greet_button = Button(self.master, text="Calibrate", command=self.calibrate_arm)
         self.greet_button.pack()
 
         self.label2 = Label(self.master, text="Control the mofo2")
