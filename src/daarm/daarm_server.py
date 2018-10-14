@@ -35,12 +35,15 @@ class DaArmServer:
     grasp_height = 0.1
     drop_height = 0.2
 
-    def __init__(self, num_planning_attempts=10):
+    def __init__(self, num_planning_attempts=20):
         rospy.init_node("daarm_server", anonymous=True)
 
         self.init_params()
         self.init_publishers()
-        self.init_arm()
+        self.init_subscribers()
+        self.init_action_clients()
+        self.init_service_clients()
+        self.init_arm(num_planning_attempts)
 
     def init_arm(self, num_planning_attempts=20):
         self.arm = MoveGroupCommander("arm")
@@ -83,7 +86,7 @@ class DaArmServer:
             action_address, kinova_msgs.msg.SetFingersPositionAction)
         self.finger_action_client.wait_for_server()
 
-    def init_services(self):
+    def init_service_clients(self):
         is_simulation = None
         try:
             is_simulation = get_ros_param("IS_SIMULATION", "")
