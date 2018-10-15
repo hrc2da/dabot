@@ -267,7 +267,9 @@ class DaArmServer:
         # calculate drop location
         drop_location = self.calculate_drop_location(
             place_x, place_y, place_x_threshold, place_y_threshold, current_block_state, message['block_size'], num_attempts=100)
+
         self.place_block(drop_location)
+        self.move_block_server.publish(MoveBlockResult(drop_location))
 
     # check if a certain x, y position is within the bounds of another x,y position
     @staticmethod
