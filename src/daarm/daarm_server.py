@@ -27,6 +27,7 @@ from moveit_commander import RobotCommander, MoveGroupCommander, PlanningSceneIn
 from moveit_msgs.msg import MoveGroupActionFeedback
 import json
 import numpy as np
+from random import randrange
 
 
 class DaArmServer:
@@ -235,6 +236,85 @@ class DaArmServer:
                         source: Point {x: float,y: float},
                         target: Point {x: float, y: float}
         """
+        block_response = json.loads(self.get_block_state(TuiStateRequest('tuio')))
+        current_block_state = block_response['tui_state']
+
+        pick_x = message['source'].x
+        pick_y = message['source'].y
+        pick_x_threshold = message['source_x_tolerance']
+        pick_y_threshold = message['source_y_tolerance']
+        block_id = message['id']
+        candidate_blocks = []
+
+        # get candidate blocks -- blocks with the same id and within the error bounds/threshold given
+        for block in current_block_state:
+            if block['id'] == block_id and self.check_block_bounds(block['x'], block['y'], pick_x, pick_y, pick_x_threshold, pick_y_threshold):
+                candidate_blocks.append(block)
+
+        # select best block to pick and pick up
+        pick_location = None
+        if len(candidate_blocks) == 1:
+            pick_location = Point(candidate_blocks[0]['x'], candidate_blocks[0]['y'])
+        else:
+            pick_location = Point(self.find_most_isolated_block(candidate_blocks, current_block_state))
+        self.pick_block(location=pick_location)
+
+        place_x = message['target'].x
+        place_y = message['target'].y
+        place_x_threshold = message['target_x_tolerance']
+        place_y_threshold = message['target_y_tolerance']
+
+        # calculate drop location
+        drop_location = self.calculate_drop_location(
+            place_x, place_y, place_x_threshold, place_y_threshold, current_block_state, message['block_size'], num_attempts=100)
+        self.place_block(drop_location)
+
+    # check if a certain x, y position is within the bounds of another x,y position
+    @staticmethod
+    def check_block_bounds(x, y, x_origin, y_origin, x_threshold, y_threshold):
+        if x <= x_origin + x_threshold and x >= x_origin + x_threshold /
+            and y <= y_origin + y_threshold and y >= y_origin + y_threshold:
+            return True
+        return False
+
+    # calculate the best location to drop the block
+    @staticmethod
+    def calculate_drop_location(x, y, x_threshold, y_threshold, blocks, block_size, num_attempts=10):
+        attempt = 0
+        x_original, y_original = x, y
+        while(attempt < num_attempts):
+            valid = True
+            for block in blocks:
+                if check_block_bounds(block['x'], block['y'], x, y, block_size / 2, block_size / 2):
+                    valid = False
+                    break
+            if valid:
+                return Point(x, y)
+            else:
+                x = randrange(x_original - x_threshold, x_original + x_threshold)
+                y = randrange(y_original - y_threshold, y_original + y_threshold)
+            attempt += 1
+
+    # candidates should have more than one element in it
+    @staticmethod
+    def find_most_isolated_block(candidates, all_blocks):
+        min_distances = []  # tuples of candidate, distance to closest block
+        for candidate in candidates:
+            min_dist = -1
+            for block in all_blocks:
+                if block['x'] == candidate['x'] and block['y'] == candidate['y']:
+                    continue
+                else:
+                    dist = self.block_dist(candidate, block)
+                    if min_dist == -1 or dist < min_dist:
+                        min_dist = dist
+            min_distances.append(candidate, min_dist)
+        most_isolated, _ = max(min_distances, key=lambda x: x[1])  # get most isolated candidate, and min_distance
+        return most_isolated['x'], most_isolated['y']
+
+    @staticmethod
+    def block_dist(block_1, block_2):
+        return sqrt((block_2['x'] - block1['x'])**2 + (block_2['y'] - block1['y'])**2)
 
     def open_gripper(self, delay=0):
         """open the gripper ALL THE WAY, then delay
