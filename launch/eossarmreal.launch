@@ -2,13 +2,13 @@
   <!-- RosBridge Server -->
   <!-- <include file="$(find rosbridge_server)/launch/rosbridge_websocket.launch" /> -->
     <!--Kinova Jaco Launch-->
-  <!-- <include file="$(find kinova_bringup)/launch/kinova_robot.launch">
+  <include file="$(find kinova_bringup)/launch/kinova_robot.launch">
     <arg name="kinova_robotType" value="j2s7s300"/>
-  </include> -->
+  </include>
   <!--Virtual Robot-->
-  <include file="$(find j2s7s300_moveit_config)/launch/j2s7s300_virtual_robot_demo.launch"/>
+  <!-- <include file="$(find j2s7s300_moveit_config)/launch/j2s7s300_virtual_robot_demo.launch"/> -->
   <!--Moveit Launch-->
-  <!-- <include file="$(find j2s7s300_moveit_config)/launch/j2s7s300_demo.launch"/> -->
+  <include file="$(find j2s7s300_moveit_config)/launch/j2s7s300_demo.launch"/>
     <rosparam command="load" file="$(find dabot)/config/params.yaml" />
     <node pkg="matt_tools" type="remapJointState.py" name="remapJointState" />    
     <node pkg="dabot" type="faketui.py" name="faketui" output="screen" />

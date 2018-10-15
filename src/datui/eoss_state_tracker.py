@@ -9,6 +9,7 @@ from datui.tui_state_tracker import TuiStateTracker
 from dabot.srv import TuiState, TuiStateResponse
 from dautils import get_ros_param
 import rospy
+from std_msgs.msg import String
 
 
 class EossStateTracker(TuiStateTracker):
@@ -22,6 +23,8 @@ class EossStateTracker(TuiStateTracker):
         # initialize the parent
         TuiStateTracker.__init__(self, node_name="tui_state")
         self.get_config_server = rospy.Service("get_config_state", TuiState, self.get_config_state)
+        self.config_publisher = rospy.Publisher("/tui_state_configs", String, queue_size=1)
+        self.block_update_subscriber = rospy.Subscriber("/blocks", String, self.publish_config)
 
     def set_workspace_bounds(self, bounds=None):
         if bounds is not None:
@@ -64,6 +67,11 @@ class EossStateTracker(TuiStateTracker):
             index = 12*orbit + id
             raw_btstr = raw_btstr[:index] + '1' + raw_btstr[index+1:]  # b/c can't modify string
         return raw_btstr
+
+    def publish_config(self, message):
+        # the point of this is to allow us to compare with /configs (which may have local search points as well)
+        rospy.sleep(0.5)
+        self.config_publisher.publish(String(self.blocks2bitstring(self.block_state)))
 
     def shutdown_tracker(self):
         self.get_config_server.shutdown()

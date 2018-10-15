@@ -17,13 +17,14 @@ import rospy
 import actionlib
 from dabot.msg import CalibrateAction, CalibrateFeedback, CalibrateResult, MoveBlockAction, MoveBlockFeedback, MoveBlockResult
 from dabot.msg import CalibrationParams
-from dabot.srv import TuiState, TuiStateRequest
+from dabot.srv import TuiState, TuiStateRequest, ArmCommand, ArmCommandResponse
 from dautils import get_ros_param, get_arm_bounds, get_tuio_bounds, tuio_to_ratio
-from geometry_msgs.msg import Point, Quaternion
+from geometry_msgs.msg import Point, Quaternion, PoseStamped
 from std_msgs.msg import String
 from kinova_msgs.msg import *
 from kinova_msgs.srv import *
-from moveit_commander import RobotCommander, MoveGroupCommander
+from moveit_commander import RobotCommander, MoveGroupCommander, PlanningSceneInterface
+from moveit_msgs.msg import MoveGroupActionFeedback
 import json
 import numpy as np
 
@@ -34,11 +35,15 @@ class DaArmServer:
     gestures = {}
     grasp_height = 0.1
     drop_height = 0.2
+    moving = False
+    paused = False
+    move_group_state = "IDLE"
 
     def __init__(self, num_planning_attempts=20):
         rospy.init_node("daarm_server", anonymous=True)
 
         self.init_params()
+        self.init_scene()
         self.init_publishers()
         self.init_subscribers()
         self.init_action_clients()
@@ -51,7 +56,27 @@ class DaArmServer:
         self.robot = RobotCommander()
         self.arm.set_num_planning_attempts(num_planning_attempts)
         self.arm.set_goal_tolerance(0.2)
+        self.init_services()
         self.init_action_servers()
+
+    def init_scene(self):
+        world_objects = ["table", "tui", "monitor", "overhead", "wall"]
+        self.robot = RobotCommander()
+        self.scene = PlanningSceneInterface()
+        for obj in world_objects:
+            self.scene.remove_world_object(obj)
+        rospy.sleep(0.5)
+        self.tuiPose = PoseStamped()
+        self.tuiPose.header.frame_id = self.robot.get_planning_frame()
+        self.wallPose = PoseStamped()
+        self.wallPose.header.frame_id = self.robot.get_planning_frame()
+        self.tuiPose.pose.position = Point(0.3556, -0.343, -0.51)
+        self.tuiDimension = (0.9906, 0.8382, 0.8636)
+        self.wallPose.pose.position = Point(-0.508, -0.343, -0.3048)
+        self.wallDimension = (0.6096, 2, 1.35)
+        rospy.sleep(0.5)
+        self.scene.add_box("tui", self.tuiPose, self.tuiDimension)
+        self.scene.add_box("wall", self.wallPose, self.wallDimension)
 
     def init_params(self):
         try:
@@ -68,32 +93,45 @@ class DaArmServer:
     def init_subscribers(self):
         self.joint_angle_subscriber = rospy.Subscriber(
             '/j2s7s300_driver/out/joint_angles', JointAngles, self.update_joints)
+        self.move_it_feedback_subscriber = rospy.Subscriber(
+            '/move_group/feedback', MoveGroupActionFeedback, self.update_move_group_state)
 
     def init_action_servers(self):
         self.calibration_server = actionlib.SimpleActionServer("calibrate_arm", CalibrateAction, self.calibrate)
         self.move_block_server = actionlib.SimpleActionServer("move_block", MoveBlockAction, self.handle_move_block)
+        #self.home_arm_server = actionlib.SimpleActionServer("home_arm", HomeArmAction, self.home_arm)
+
+    def init_services(self):
+        self.home_arm_service = rospy.Service("/home_arm", ArmCommand, self.handle_home_arm)
+        # emergency stop
+        self.stop_arm_service = rospy.Service("/stop_arm", ArmCommand, self.handle_stop_arm)
+        # stop and pause for a bit
+        self.pause_arm_service = rospy.Service("/pause_arm", ArmCommand, self.handle_pause_arm)
+        self.start_arm_service = rospy.Service("/restart_arm", ArmCommand, self.handle_restart_arm)
 
     def init_action_clients(self):
         # Action Client for joint control
-        action_address = '/j2s7s300_driver/joints_action/joint_angles'
-        self.joint_action_client = actionlib.SimpleActionClient(action_address, kinova_msgs.msg.ArmJointAnglesAction)
+        joint_action_address = '/j2s7s300_driver/joints_action/joint_angles'
+        self.joint_action_client = actionlib.SimpleActionClient(
+            joint_action_address, kinova_msgs.msg.ArmJointAnglesAction)
         rospy.loginfo('Waiting for ArmJointAnglesAction server...')
         self.joint_action_client.wait_for_server()
         rospy.loginfo('ArmJointAnglesAction Server Connected')
 
         # Service to move the gripper fingers
+        finger_action_address = '/j2s7s300_driver/fingers_action/finger_positions'
         self.finger_action_client = actionlib.SimpleActionClient(
-            action_address, kinova_msgs.msg.SetFingersPositionAction)
+            finger_action_address, kinova_msgs.msg.SetFingersPositionAction)
         self.finger_action_client.wait_for_server()
 
     def init_service_clients(self):
-        is_simulation = None
+        self.is_simulation = None
         try:
-            is_simulation = get_ros_param("IS_SIMULATION", "")
+            self.is_simulation = get_ros_param("IS_SIMULATION", "")
         except:
-            is_simulation = False
+            self.is_simulation = False
 
-        if is_simulation is True:
+        if self.is_simulation is True:
             # setup alternatives to jaco services for emergency stop, joint control, and finger control
             pass
         # Service to get TUI State
@@ -102,7 +140,7 @@ class DaArmServer:
 
         # Service for homing the arm
         home_arm_service = '/j2s7s300_driver/in/home_arm'
-        self.home_arm_service = rospy.ServiceProxy(home_arm_service, HomeArm)
+        self.home_arm_client = rospy.ServiceProxy(home_arm_service, HomeArm)
         rospy.loginfo('Waiting for kinova home arm service')
         rospy.wait_for_service(home_arm_service)
         rospy.loginfo('Kinova home arm service server connected')
@@ -121,29 +159,56 @@ class DaArmServer:
         rospy.wait_for_service(start_service)
         rospy.loginfo('Start service server connected')
 
+    def handle_start_arm(self, message):
+        return self.restart_arm()
+
+    def handle_stop_arm(self, message):
+        return self.stop_motion()
+
+    def handle_pause_arm(self, message):
+        self.stop_motion(home=True, pause=True)
+        return str(self.paused)
+
+    def handle_restart_arm(self, message):
+        self.restart_arm()
+        self.paused = False
+        return str(self.paused)
+
+    def handle_home_arm(self, message):
+        try:
+            status = self.home_arm_kinova()
+            return json.dumps(status)
+        except rospy.ServiceException as e:
+            rospy.loginfo("Homing arm failed")
+
     def home_arm(self):
         # send the arm home
-        pass
+        # for now, let's just use the kinova home
+        self.home_arm_client()
 
     def home_arm_kinova(self):
         """Takes the arm to the kinova default home if possible
         """
         self.arm.set_named_target("Home")
-        self.arm.go()
+        try:
+            self.arm.go()
+            return "successful home"
+        except:
+            return "failed to home"
 
     def move_fingers(self, finger1_pct, finger2_pct, finger3_pct):
         finger_max_turn = 6800
         goal = kinova_msgs.msg.SetFingersPositionGoal()
-        goal.fingers.finger1 = (finger1_pct/100.0)*finger_max_turn
-        goal.fingers.finger2 = (finger2_pct/100.0)*finger_max_turn
-        goal.fingers.finger3 = (finger3_pct/100.0)*finger_max_turn
+        goal.fingers.finger1 = float((finger1_pct/100.0)*finger_max_turn)
+        goal.fingers.finger2 = float((finger2_pct/100.0)*finger_max_turn)
+        goal.fingers.finger3 = float((finger3_pct/100.0)*finger_max_turn)
 
         self.finger_action_client.send_goal(goal)
         if self.finger_action_client.wait_for_result(rospy.Duration(5.0)):
             return self.finger_action_client.get_result()
         else:
             self.finger_action_client.cancel_all_goals()
-            rospy.WARN('the gripper action timed-out')
+            rospy.loginfo('the gripper action timed-out')
             return None
 
     def move_joint_angles(self, angle_set):
@@ -174,7 +239,7 @@ class DaArmServer:
     def open_gripper(self, delay=0):
         """open the gripper ALL THE WAY, then delay
         """
-        if is_simulation is True:
+        if self.is_simulation is True:
             self.gripper.set_named_target("Open")
             self.gripper.go()
         else:
@@ -216,21 +281,43 @@ class DaArmServer:
 
             if action_server:
                 action_server.publish_feedback(CalibrateFeedback("Plan Found"))
-            self.arm.execute(plan)
+            self.arm.execute(plan, wait=False)
+            while self.move_group_state is not "IDLE":
+                rospy.sleep(0.001)
+                if self.paused is True:
+                    self.arm.stop()
+                    return
+            rospy.loginfo("LEAVING THE WHILE LOOP")
             if corrections > 0:
+                rospy.loginfo("Correcting the pose")
                 self.move_joint_angles(angle_set)
             rospy.sleep(delay)
         else:
             if action_server:
                 action_server.publish_feedback(CalibrateFeedback("Planning Failed"))
 
-    def handle_move_sequence(self, message):
-        pass
+    # Let's have the caller handle sequences instead.
+    # def handle_move_sequence(self, message):
+    #     # if the move fails, do we cancel the sequence
+    #     cancellable = message.cancellable
+    #     moves = message.moves
+    #     for move in moves:
+
+    #         try:
+    #             self.handle_move_block(move)
+    #         except Exception:
+    #             if cancellable:
+    #                 rospy.loginfo("Part of move failed, cancelling the rest.")
+    #                 break
+
+    def update_move_group_state(self, message):
+        rospy.loginfo(message.feedback.state)
+        self.move_group_state = message.feedback.state
 
     def get_grasp_orientation(self, position):
         return Quaternion(1, 0, 0, 0)
 
-    def update_joints(self, message, joints):
+    def update_joints(self, joints):
         self.joint_angles = [joints.joint1, joints.joint2, joints.joint3,
                              joints.joint4, joints.joint5, joints.joint6, joints.joint7]
 
@@ -276,12 +363,19 @@ class DaArmServer:
         self.move_z(0.1)
         self.close_gripper()
 
-    def stop_motion(self, home=False):
+    def stop_motion(self, home=False, pause=False):
+        rospy.loginfo("STOPPING the ARM")
         # cancel the moveit_trajectory
-        self.arm.stop()
+        # self.arm.stop()
+
         # call the emergency stop on kinova
         self.emergency_stop()
+        # rospy.sleep(0.5)
+
+        if pause is True:
+            self.paused = True
         if home is True:
+            # self.restart_arm()
             self.home_arm()
 
     def calibrate(self, message):

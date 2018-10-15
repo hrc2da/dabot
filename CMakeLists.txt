@@ -62,6 +62,7 @@ add_service_files(
 #    DIRECTORY srv
    FILES
    TuiState.srv
+   ArmCommand.srv
 #   Service1.srv
 #   Service2.srv
 )

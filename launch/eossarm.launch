@@ -1,6 +1,6 @@
 <launch>
-    <rosparam command="load" file="$(find daarm)/params.yaml" />
-    <node pkg="matt_tools" type="remapJointState.py" name="remapJointState">    
-    <node pkg="dabot" type="eoss_state_tracker.py" name="eoss_state_tracker" output="screen">
-    <node pkg="dabot" type="daarm_server.py" name="daarm_server" output="screen">
+    <rosparam command="load" file="$(find dabot)/config/params.yaml" />
+    <node pkg="matt_tools" type="remapJointState.py" name="remapJointState" />    
+    <!-- <node pkg="dabot" type="eoss_state_tracker.py" name="eoss_state_tracker" output="screen"> -->
+    <node pkg="dabot" type="daarm_server.py" name="daarm_server" output="screen" />
 </launch>
