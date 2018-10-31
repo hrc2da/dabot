@@ -15,9 +15,7 @@ Basic actions:
 
 import rospy
 import actionlib
-from dabot.msg import CalibrateAction, CalibrateFeedback, CalibrateResult, \
-    MoveBlockAction, MoveBlockFeedback, MoveBlockResult, \
-    MovePoseAction, MovePoseFeedback, MovePoseResult
+from dabot.msg import CalibrateAction, CalibrateFeedback, CalibrateResult, MoveBlockAction, MoveBlockFeedback, MoveBlockResult
 from dabot.msg import CalibrationParams
 from dabot.srv import TuiState, TuiStateRequest, ArmCommand, ArmCommandResponse
 from dautils import get_ros_param, get_arm_bounds, get_tuio_bounds, tuio_to_ratio
@@ -27,11 +25,8 @@ from kinova_msgs.msg import *
 from kinova_msgs.srv import *
 from moveit_commander import RobotCommander, MoveGroupCommander, PlanningSceneInterface
 from moveit_msgs.msg import MoveGroupActionFeedback
-from actionlib_msgs.msg import GoalStatusArray
-from control_msgs.msg import FollowJointTrajectoryActionGoal, FollowJointTrajectoryActionResult
 import json
 import numpy as np
-from random import randrange
 
 
 class DaArmServer:
@@ -43,10 +38,8 @@ class DaArmServer:
     moving = False
     paused = False
     move_group_state = "IDLE"
-    last_joint_trajectory_goal = ""
-    last_joint_trajectory_result = ""
 
-    def __init__(self, num_planning_attempts=100):
+    def __init__(self, num_planning_attempts=20):
         rospy.init_node("daarm_server", anonymous=True)
 
         self.init_params()
@@ -57,12 +50,12 @@ class DaArmServer:
         self.init_service_clients()
         self.init_arm(num_planning_attempts)
 
-    def init_arm(self, num_planning_attempts=100):
+    def init_arm(self, num_planning_attempts=20):
         self.arm = MoveGroupCommander("arm")
         self.gripper = MoveGroupCommander("gripper")
         self.robot = RobotCommander()
         self.arm.set_num_planning_attempts(num_planning_attempts)
-        self.arm.set_goal_tolerance(0.002)
+        self.arm.set_goal_tolerance(0.2)
         self.init_services()
         self.init_action_servers()
 
@@ -91,8 +84,6 @@ class DaArmServer:
             self.drop_height = get_ros_param("DROP_HEIGHT", "Drop height defaulting to 0.2")
         except ValueError as e:
             rospy.loginfo(e)
-    def handle_param_update(self, message):
-        self.init_params()
 
     def init_publishers(self):
         self.calibration_publisher = rospy.Publisher("/calibration_results", CalibrationParams)
@@ -102,30 +93,13 @@ class DaArmServer:
     def init_subscribers(self):
         self.joint_angle_subscriber = rospy.Subscriber(
             '/j2s7s300_driver/out/joint_angles', JointAngles, self.update_joints)
-        # self.move_it_feedback_subscriber = rospy.Subscriber(
-        #     '/move_group/feedback', MoveGroupActionFeedback, self.update_move_group_state)
-        self.joint_trajectory_subscriber = rospy.Subscriber(
-            '/j2s7s300/follow_joint_trajectory/status', GoalStatusArray, self.update_joint_trajectory_state)
-
-        self.joint_trajectory_goal_subscriber = rospy.Subscriber(
-            '/j2s7s300/follow_joint_trajectory/goal', FollowJointTrajectoryActionGoal, self.update_joint_trajectory_goal)
-
-        self.joint_trajectory_result_subscriber = rospy.Subscriber(
-            '/j2s7s300/follow_joint_trajectory/result', FollowJointTrajectoryActionResult, self.update_joint_trajectory_result)
-
-        self.param_update_subscriber = rospy.Subscriber("/param_update", String, self.handle_param_update)
+        self.move_it_feedback_subscriber = rospy.Subscriber(
+            '/move_group/feedback', MoveGroupActionFeedback, self.update_move_group_state)
 
     def init_action_servers(self):
-        self.calibration_server = actionlib.SimpleActionServer(
-            "calibrate_arm", CalibrateAction, self.calibrate, auto_start=False)
-        self.calibration_server.start()
-        self.move_block_server = actionlib.SimpleActionServer(
-            "move_block", MoveBlockAction, self.handle_move_block, auto_start=False)
-        self.move_block_server.start()
+        self.calibration_server = actionlib.SimpleActionServer("calibrate_arm", CalibrateAction, self.calibrate)
+        self.move_block_server = actionlib.SimpleActionServer("move_block", MoveBlockAction, self.handle_move_block)
         #self.home_arm_server = actionlib.SimpleActionServer("home_arm", HomeArmAction, self.home_arm)
-        self.move_pose_server = actionlib.SimpleActionServer(
-            "move_pose", MovePoseAction, self.handle_move_pose, auto_start=False)
-        self.move_pose_server.start()
 
     def init_services(self):
         self.home_arm_service = rospy.Service("/home_arm", ArmCommand, self.handle_home_arm)
@@ -150,10 +124,8 @@ class DaArmServer:
             finger_action_address, kinova_msgs.msg.SetFingersPositionAction)
         self.finger_action_client.wait_for_server()
 
-        #
-
     def init_service_clients(self):
-        self.is_simulation = False
+        self.is_simulation = None
         try:
             self.is_simulation = get_ros_param("IS_SIMULATION", "")
         except:
@@ -258,109 +230,11 @@ class DaArmServer:
             self.joint_action_client.cancel_all_goals()
             return None
 
-    def handle_move_block(self, message, pick_tries=1, place_tries=1):
+    def handle_move_block(self, message):
         """msg format: {id: int,
                         source: Point {x: float,y: float},
                         target: Point {x: float, y: float}
         """
-        block_response = json.loads(self.get_block_state(TuiStateRequest('tuio')))
-        current_block_state = block_response['tui_state']
-
-        pick_x = message['source'].x
-        pick_y = message['source'].y
-        pick_x_threshold = message['source_x_tolerance']
-        pick_y_threshold = message['source_y_tolerance']
-        block_id = message['id']
-        candidate_blocks = []
-
-        # get candidate blocks -- blocks with the same id and within the error bounds/threshold given
-        for block in current_block_state:
-            if block['id'] == block_id and self.check_block_bounds(block['x'], block['y'], pick_x, pick_y, pick_x_threshold, pick_y_threshold):
-                candidate_blocks.append(block)
-
-        # select best block to pick and pick up
-        pick_location = None
-        if len(candidate_blocks) == 1:
-            pick_location = Point(candidate_blocks[0]['x'], candidate_blocks[0]['y'])
-        else:
-            pick_location = Point(self.find_most_isolated_block(candidate_blocks, current_block_state))
-        for i in range(pick_tries):
-            try:
-                self.pick_block(location=pick_location)
-                break
-            except:
-                if i < pick_tries:
-                    print("pick failed and trying again...")
-                else:
-                    print("pick failed and out of attempts...")
-                    return
-
-        place_x = message['target'].x
-        place_y = message['target'].y
-        place_x_threshold = message['target_x_tolerance']
-        place_y_threshold = message['target_y_tolerance']
-
-        # calculate drop location
-        drop_location = self.calculate_drop_location(
-            place_x, place_y, place_x_threshold, place_y_threshold, current_block_state, message['block_size'], num_attempts=100)
-        for i in range(place_tries):
-            try:
-                self.place_block(drop_location)
-                break
-            except:
-                if i < pick_tries:
-                    print("place failed and trying again...")
-                else:
-                    print("place failed and out of attempts...")
-                    return
-        self.move_block_server.publish(MoveBlockResult(drop_location))
-
-    # check if a certain x, y position is within the bounds of another x,y position
-    @staticmethod
-    def check_block_bounds(x, y, x_origin, y_origin, x_threshold, y_threshold):
-        if x <= x_origin + x_threshold and x >= x_origin + x_threshold \
-                and y <= y_origin + y_threshold and y >= y_origin + y_threshold:
-            return True
-        return False
-
-    # calculate the best location to drop the block
-    @staticmethod
-    def calculate_drop_location(x, y, x_threshold, y_threshold, blocks, block_size, num_attempts=10):
-        attempt = 0
-        x_original, y_original = x, y
-        while(attempt < num_attempts):
-            valid = True
-            for block in blocks:
-                if check_block_bounds(block['x'], block['y'], x, y, block_size / 2, block_size / 2):
-                    valid = False
-                    break
-            if valid:
-                return Point(x, y)
-            else:
-                x = randrange(x_original - x_threshold, x_original + x_threshold)
-                y = randrange(y_original - y_threshold, y_original + y_threshold)
-            attempt += 1
-
-    # candidates should have more than one element in it
-    @staticmethod
-    def find_most_isolated_block(candidates, all_blocks):
-        min_distances = []  # tuples of candidate, distance to closest block
-        for candidate in candidates:
-            min_dist = -1
-            for block in all_blocks:
-                if block['x'] == candidate['x'] and block['y'] == candidate['y']:
-                    continue
-                else:
-                    dist = self.block_dist(candidate, block)
-                    if min_dist == -1 or dist < min_dist:
-                        min_dist = dist
-            min_distances.append(candidate, min_dist)
-        most_isolated, _ = max(min_distances, key=lambda x: x[1])  # get most isolated candidate, and min_distance
-        return most_isolated['x'], most_isolated['y']
-
-    @staticmethod
-    def block_dist(block_1, block_2):
-        return np.sqrt((block_2['x'] - block_1['x'])**2 + (block_2['y'] - block_1['y'])**2)
 
     def open_gripper(self, delay=0):
         """open the gripper ALL THE WAY, then delay
@@ -369,11 +243,7 @@ class DaArmServer:
             self.gripper.set_named_target("Open")
             self.gripper.go()
         else:
-            try:
-                rospy.loginfo("TRYING IT!!")
-                self.move_fingers(50, 50, 50)
-            except Exception as e:
-                rospy.loginfo("Caught it!!"+str(e))
+            self.move_fingers(50, 50, 50)
         rospy.sleep(delay)
 
     def close_gripper(self, delay=0):
@@ -389,56 +259,44 @@ class DaArmServer:
         # as well as specify the arm or gripper choice
         pass
 
-    def handle_move_pose(self, message):
-        # takes a geometry_msgs/Pose message
-        self.move_arm_to_pose(message.target.position, message.target.orientation, action_server=self.move_pose_server)
-        self.move_pose_server.set_succeeded()
+    def move_arm_to_pose(self, position, orientation, delay=0, waypoints=[], corrections=1, action_server=None):
+        if len(waypoints) > 0:
+            # this is good for doing gestures
+            plan, fraction = self.arm.compute_cartesian_path(waypoints, eef_step=0.01, jump_threshold=0.0)
+        else:
+            p = self.arm.get_current_pose()
+            p.pose.position = position
+            p.pose.orientation = orientation
+            self.arm.set_pose_target(p)
+            plan = self.arm.plan()
+        if plan:
+            # get the last pose to correct if desired
+            ptPos = plan.joint_trajectory.points[-1].positions
+            # print "=================================="
+            # print "Last point of the current trajectory: "
+            angle_set = list()
+            for i in range(len(ptPos)):
+                tempPos = ptPos[i]*180/np.pi + int(round((self.joint_angles[i] - ptPos[i]*180/np.pi)/(360)))*360
+                angle_set.append(tempPos)
 
-    def move_arm_to_pose(self, position, orientation, delay=0, waypoints=[], corrections=0, action_server=None):
-        for i in range(corrections+1):
-            if len(waypoints) > 0 and i < 1:
-                # this is good for doing gestures
-                plan, fraction = self.arm.compute_cartesian_path(waypoints, eef_step=0.01, jump_threshold=0.0)
-            else:
-                p = self.arm.get_current_pose()
-                p.pose.position = position
-                p.pose.orientation = orientation
-                self.arm.set_pose_target(p)
-                plan = self.arm.plan()
-            if plan:
-                # get the last pose to correct if desired
-                ptPos = plan.joint_trajectory.points[-1].positions
-                # print "=================================="
-                # print "Last point of the current trajectory: "
-                angle_set = list()
-                for i in range(len(ptPos)):
-                    tempPos = ptPos[i]*180/np.pi + int(round((self.joint_angles[i] - ptPos[i]*180/np.pi)/(360)))*360
-                    angle_set.append(tempPos)
-
-                if action_server:
-                    pass
-                    #action_server.publish_feedback(CalibrateFeedback("Plan Found"))
-                last_traj_goal = self.last_joint_trajectory_goal
-                self.arm.execute(plan, wait=False)
-                # this is a bit naive, but I'm going to loop until a new trajectory goal gets published
-                while self.last_joint_trajectory_goal == last_traj_goal:
-                    rospy.sleep(0.001)
-                current_goal = self.last_joint_trajectory_goal
-                # then loop until a result for it gets published
-                while self.last_joint_trajectory_result != current_goal:
-                    rospy.sleep(0.001)
-                    if self.paused is True:
-                        self.arm.stop()  # cancel the moveit goals
-                        return
-                rospy.loginfo("LEAVING THE WHILE LOOP")
-                # for i in range(corrections):
-                #     rospy.loginfo("Correcting the pose")
-                #     self.move_joint_angles(angle_set)
-                rospy.sleep(delay)
-            else:
-                if action_server:
-                    #action_server.publish_feedback(CalibrateFeedback("Planning Failed"))
-                    pass
+            if action_server:
+                action_server.publish_feedback(CalibrateFeedback("Plan Found"))
+            self.arm.execute(plan, wait=False)
+            while self.move_group_state is not "IDLE":
+                rospy.sleep(0.001)
+                print(self.move_group_state)
+                if self.paused is True:
+                    self.arm.stop()
+                    return
+            rospy.loginfo("LEAVING THE WHILE LOOP")
+            print("LEAVING THE LOOOOOOOOOP!!!!")
+            if corrections > 0:
+                rospy.loginfo("Correcting the pose")
+                self.move_joint_angles(angle_set)
+            rospy.sleep(delay)
+        else:
+            if action_server:
+                action_server.publish_feedback(CalibrateFeedback("Planning Failed"))
 
     # Let's have the caller handle sequences instead.
     # def handle_move_sequence(self, message):
@@ -457,21 +315,6 @@ class DaArmServer:
     def update_move_group_state(self, message):
         rospy.loginfo(message.feedback.state)
         self.move_group_state = message.feedback.state
-
-    def update_joint_trajectory_state(self, message):
-        # print(message.status_list)
-        if len(message.status_list) > 0:
-            self.joint_trajectory_state = message.status_list[0].status
-        else:
-            self.joint_trajectory_state = 0
-
-    def update_joint_trajectory_goal(self, message):
-        #print("goalisasis", message.goal_id.id)
-        self.last_joint_trajectory_goal = message.goal_id.id
-
-    def update_joint_trajectory_result(self, message):
-        #print("resultisasis", message.status.goal_id.id)
-        self.last_joint_trajectory_result = message.status.goal_id.id
 
     def get_grasp_orientation(self, position):
         return Quaternion(1, 0, 0, 0)
@@ -528,7 +371,7 @@ class DaArmServer:
         # self.arm.stop()
 
         # call the emergency stop on kinova
-        self.emergency_stop()
+        # self.emergency_stop()
         # rospy.sleep(0.5)
 
         if pause is True:
@@ -541,7 +384,6 @@ class DaArmServer:
         print("calibrating ", message)
         self.place_calibration_block()
         rospy.sleep(5)  # five seconds to correct the drop if it bounced, etc.
-        print("moving on...")
         self.calibration_server.publish_feedback(CalibrateFeedback("getting the coordinates"))
         params = self.record_calibration_params()
         self.set_arm_calibration_params(params[0], params[1])
@@ -563,14 +405,11 @@ class DaArmServer:
         self.close_gripper(2)
         # move to a predetermined spot
         self.calibration_server.publish_feedback(CalibrateFeedback("moving to drop"))
-        try:
-            self.move_arm_to_pose(Point(0.4, -0.4, 0.1), Quaternion(1, 0, 0, 0), corrections=0)
-        except Exception as e:
-            rospy.loginfo("THIS IS TH PRoblem"+str(e))
+        self.move_arm_to_pose(Point(0.4, -0.4, 0.1), Quaternion(0, 1, 0, 0))
         # drop the block
         self.open_gripper()
         self.calibration_server.publish_feedback(CalibrateFeedback("dropped the block"))
-        calibration_block = {'x': 0.4, 'y': -0.4, 'id': 0}
+        calibration_block = {'x': 0.4, 'y': 0.4, 'id': 0}
         calibration_action_belief = {"action": "add", "block": calibration_block}
         self.action_belief_publisher.publish(String(json.dumps(calibration_action_belief)))
         rospy.loginfo("published arm belief")

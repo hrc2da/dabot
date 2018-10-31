@@ -1,0 +1,8 @@
+#goal
+geometry_msgs/Pose target
+---
+#result
+geometry_msgs/Pose location #return the location of the moved block
+---
+#feedback
+geometry_msgs/Pose location #the step number of the move sequence

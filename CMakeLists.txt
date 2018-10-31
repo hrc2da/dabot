@@ -74,6 +74,7 @@ add_service_files(
 #   Action2.action
     Calibrate.action
     MoveBlock.action
+    MovePose.action
  )
 
  ## Generate added messages and services with any dependencies listed here
