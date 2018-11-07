@@ -15,7 +15,7 @@ import actionlib
 from std_msgs.msg import String
 from dabot.msg import CalibrateAction, CalibrateGoal
 from dautils import calibrate_arm
-from dabot.srv import TargetDesigns, TargetDesignsResponse
+from dabot.srv import TargetDesigns, TargetDesignsResponse, TuiState, TuiStateResponse
 
 
 class EossLocalSearchAgent:
@@ -25,8 +25,12 @@ class EossLocalSearchAgent:
 
     def __init__(self):
         rospy.init_node("local_search_agent", anonymous=False)
-        self.evaluated_config_listener = rospy.Subscriber("/configurations", String, self.update_configurations)
+        self.evaluated_config_listener = rospy.Subscriber("/configs", String, self.update_configurations)
         self.ready_publisher = rospy.Publisher("/agent_ready", String, queue_size=1)
+        # Service to get TUI State
+        rospy.wait_for_service('get_config_state')
+        self.get_current_config = rospy.ServiceProxy('get_config_state', TuiState)
+        #service to get the set of designs that match the criteria, the criteria set
         self.criteria_set_service = rospy.Service("/get_agent_designs", TargetDesigns, self.handle_get_criteria_set)
 
     def update_configurations(self, message):
@@ -61,6 +65,21 @@ class EossLocalSearchAgent:
                 return False
         return True
 
+    def sort_by_diff(self):
+        """
+        This function sorts by the number of moves (add, remove, move) it would take to realize a config
+        It returns a dict of lists of designs keyed by the number of moves
+        """
+
+    def config_to_moves(self,design):
+        """
+        Take a config, compare it to the current config, and output a list of moves to realize it (not necessarily optimal)
+        """
+        current_config = self.get_current_config().tui_state
+        #look for moves first
+        #look for adds
+        #look for removes
+
     # stolen from https://stackoverflow.com/questions/32791911/fast-calculation-of-pareto-front-in-python
     def is_pareto_efficient_indexed(self, costs, return_mask=True):  # <- Fastest for many points
         """
@@ -86,3 +105,4 @@ class EossLocalSearchAgent:
             return is_efficient_mask
         else:
             return is_efficient
+

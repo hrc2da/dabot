@@ -20,7 +20,7 @@ from dabot.msg import CalibrateAction, CalibrateFeedback, CalibrateResult, \
     MovePoseAction, MovePoseFeedback, MovePoseResult
 from dabot.msg import CalibrationParams
 from dabot.srv import TuiState, TuiStateRequest, ArmCommand, ArmCommandResponse
-from dautils import get_ros_param, get_arm_bounds, get_tuio_bounds, tuio_to_ratio
+from dautils import get_ros_param, get_arm_bounds, get_tuio_bounds, tuio_to_ratio, tuio_to_arm
 from geometry_msgs.msg import Point, Quaternion, PoseStamped
 from std_msgs.msg import String
 from kinova_msgs.msg import *
@@ -31,15 +31,17 @@ from actionlib_msgs.msg import GoalStatusArray
 from control_msgs.msg import FollowJointTrajectoryActionGoal, FollowJointTrajectoryActionResult
 import json
 import numpy as np
-from random import randrange
+import random
 
 
 class DaArmServer:
     """The basic, design problem/tui agnostic arm server
     """
     gestures = {}
-    grasp_height = 0.1
-    drop_height = 0.2
+    grasp_height = 0.05
+    drop_height = 0.07
+    START_TOLERANCE = 0.05 # this is for moveit to check for change in joint angles before moving
+    GOAL_TOLERANCE = 0.01
     moving = False
     paused = False
     move_group_state = "IDLE"
@@ -58,11 +60,13 @@ class DaArmServer:
         self.init_arm(num_planning_attempts)
 
     def init_arm(self, num_planning_attempts=100):
+        rospy.set_param("/move_group/trajectory_execution/allowed_start_tolerance", self.START_TOLERANCE)
         self.arm = MoveGroupCommander("arm")
         self.gripper = MoveGroupCommander("gripper")
         self.robot = RobotCommander()
         self.arm.set_num_planning_attempts(num_planning_attempts)
-        self.arm.set_goal_tolerance(0.002)
+        self.arm.set_goal_position_tolerance(self.GOAL_TOLERANCE)
+        self.arm.set_goal_orientation_tolerance(0.02)
         self.init_services()
         self.init_action_servers()
 
@@ -87,8 +91,8 @@ class DaArmServer:
 
     def init_params(self):
         try:
-            self.grasp_height = get_ros_param("GRASP_HEIGHT", "Grasp height defaulting to 0.1")
-            self.drop_height = get_ros_param("DROP_HEIGHT", "Drop height defaulting to 0.2")
+            self.grasp_height = get_ros_param("GRASP_HEIGHT", "Grasp height defaulting to 0.01")
+            self.drop_height = get_ros_param("DROP_HEIGHT", "Drop height defaulting to 0.07")
         except ValueError as e:
             rospy.loginfo(e)
     def handle_param_update(self, message):
@@ -263,87 +267,98 @@ class DaArmServer:
                         source: Point {x: float,y: float},
                         target: Point {x: float, y: float}
         """
-        block_response = json.loads(self.get_block_state(TuiStateRequest('tuio')))
-        current_block_state = block_response['tui_state']
+        
+        block_response = json.loads(self.get_block_state(TuiStateRequest('tuio')).tui_state)
+        current_block_state = block_response
 
-        pick_x = message['source'].x
-        pick_y = message['source'].y
-        pick_x_threshold = message['source_x_tolerance']
-        pick_y_threshold = message['source_y_tolerance']
-        block_id = message['id']
+        print(message)
+
+        pick_x = message.source.x
+        pick_y = message.source.y
+        pick_x_threshold = message.source_x_tolerance
+        pick_y_threshold = message.source_y_tolerance
+        block_id = message.id
         candidate_blocks = []
 
         # get candidate blocks -- blocks with the same id and within the error bounds/threshold given
+        print(current_block_state)
         for block in current_block_state:
+            print(block, self.check_block_bounds(block['x'], block['y'], pick_x, pick_y, pick_x_threshold, pick_y_threshold))
             if block['id'] == block_id and self.check_block_bounds(block['x'], block['y'], pick_x, pick_y, pick_x_threshold, pick_y_threshold):
                 candidate_blocks.append(block)
 
         # select best block to pick and pick up
         pick_location = None
         if len(candidate_blocks) == 1:
-            pick_location = Point(candidate_blocks[0]['x'], candidate_blocks[0]['y'])
+            pick_location = Point(candidate_blocks[0]['x'], candidate_blocks[0]['y'],0)
         else:
             pick_location = Point(self.find_most_isolated_block(candidate_blocks, current_block_state))
         for i in range(pick_tries):
             try:
-                self.pick_block(location=pick_location)
+                arm_pick_location = tuio_to_arm(pick_location.x, pick_location.y, get_tuio_bounds(), get_arm_bounds())
+                self.pick_block(location=Point(arm_pick_location[0], arm_pick_location[1], 0))
                 break
-            except:
+            except Exception as e:
                 if i < pick_tries:
-                    print("pick failed and trying again...")
+                    print("pick failed and trying again...",e)
                 else:
-                    print("pick failed and out of attempts...")
+                    print("pick failed and out of attempts...",e)
                     return
 
-        place_x = message['target'].x
-        place_y = message['target'].y
-        place_x_threshold = message['target_x_tolerance']
-        place_y_threshold = message['target_y_tolerance']
+        place_x = message.target.x
+        place_y = message.target.y
+        place_x_threshold = message.target_x_tolerance
+        place_y_threshold = message.target_y_tolerance
 
         # calculate drop location
         drop_location = self.calculate_drop_location(
-            place_x, place_y, place_x_threshold, place_y_threshold, current_block_state, message['block_size'], num_attempts=100)
+            place_x, place_y, place_x_threshold, place_y_threshold, current_block_state, message.block_size, num_attempts=100)
+        print("tuio drop", drop_location)
         for i in range(place_tries):
             try:
-                self.place_block(drop_location)
+                arm_drop_location = tuio_to_arm(drop_location.x, drop_location.y, get_tuio_bounds(), get_arm_bounds())
+                print("arm drop: ", arm_drop_location)
+                self.place_block(Point(arm_drop_location[0], arm_drop_location[1], 0))
                 break
-            except:
+            except Exception as e:
                 if i < pick_tries:
-                    print("place failed and trying again...")
+                    print("place failed and trying again...", e)
                 else:
-                    print("place failed and out of attempts...")
+                    print("place failed and out of attempts...", e)
                     return
-        self.move_block_server.publish(MoveBlockResult(drop_location))
+        # assume success if we made it this far
+        self.move_block_server.set_succeeded(MoveBlockResult(drop_location))
+        
 
     # check if a certain x, y position is within the bounds of another x,y position
     @staticmethod
     def check_block_bounds(x, y, x_origin, y_origin, x_threshold, y_threshold):
-        if x <= x_origin + x_threshold and x >= x_origin + x_threshold \
-                and y <= y_origin + y_threshold and y >= y_origin + y_threshold:
+        if x <= x_origin + x_threshold and x >= x_origin - x_threshold \
+                and y <= y_origin + y_threshold and y >= y_origin - y_threshold:
             return True
         return False
 
     # calculate the best location to drop the block
-    @staticmethod
-    def calculate_drop_location(x, y, x_threshold, y_threshold, blocks, block_size, num_attempts=10):
+    def calculate_drop_location(self, x, y, x_threshold, y_threshold, blocks, block_size, num_attempts=10):
         attempt = 0
         x_original, y_original = x, y
         while(attempt < num_attempts):
             valid = True
             for block in blocks:
-                if check_block_bounds(block['x'], block['y'], x, y, block_size / 2, block_size / 2):
+                if self.check_block_bounds(block['x'], block['y'], x, y, block_size / 2, block_size / 2):
                     valid = False
                     break
             if valid:
-                return Point(x, y)
+                return Point(x, y, 0)
             else:
-                x = randrange(x_original - x_threshold, x_original + x_threshold)
-                y = randrange(y_original - y_threshold, y_original + y_threshold)
+                x = random.uniform(x_original - x_threshold, x_original + x_threshold)
+                y = random.uniform(y_original - y_threshold, y_original + y_threshold)
             attempt += 1
 
     # candidates should have more than one element in it
     @staticmethod
     def find_most_isolated_block(candidates, all_blocks):
+        print(candidates)
         min_distances = []  # tuples of candidate, distance to closest block
         for candidate in candidates:
             min_dist = -1
@@ -356,7 +371,7 @@ class DaArmServer:
                         min_dist = dist
             min_distances.append(candidate, min_dist)
         most_isolated, _ = max(min_distances, key=lambda x: x[1])  # get most isolated candidate, and min_distance
-        return most_isolated['x'], most_isolated['y']
+        return most_isolated['x'], most_isolated['y'], 0
 
     @staticmethod
     def block_dist(block_1, block_2):
@@ -379,8 +394,13 @@ class DaArmServer:
     def close_gripper(self, delay=0):
         """close the gripper ALL THE WAY, then delay
         """
-        self.gripper.set_named_target("Close")
-        self.gripper.go()
+        # self.gripper.set_named_target("Close")
+        # self.gripper.go()
+        try:
+            rospy.loginfo("TRYING IT!!")
+            self.move_fingers(80, 80, 80)
+        except Exception as e:
+            rospy.loginfo("Caught it!!"+str(e))
         rospy.sleep(delay)
 
     def handle_gesture(self, gesture):
@@ -394,8 +414,25 @@ class DaArmServer:
         self.move_arm_to_pose(message.target.position, message.target.orientation, action_server=self.move_pose_server)
         self.move_pose_server.set_succeeded()
 
-    def move_arm_to_pose(self, position, orientation, delay=0, waypoints=[], corrections=0, action_server=None):
+    def check_plan_result(self,target_pose,cur_pose):
+        #we'll do a very lenient check, this is to find failures, not error
+        #also only checking position, not orientation
+        rospy.loginfo("checking pose:"+str(target_pose)+str(cur_pose))
+        if target_pose.pose.position.x - cur_pose.pose.position.x > self.GOAL_TOLERANCE*2:
+            print("x error too far")
+            return False
+        if target_pose.pose.position.y - cur_pose.pose.position.y > self.GOAL_TOLERANCE*2:
+            print("y error too far")
+            return False
+        if target_pose.pose.position.z - cur_pose.pose.position.z > self.GOAL_TOLERANCE*2:
+            print("z error too far")
+            return False
+        print("tolerable error")
+        return True
+    # expects cooridinates for position to be in arm space
+    def move_arm_to_pose(self, position, orientation, delay=0.5, waypoints=[], corrections=1, action_server=None):
         for i in range(corrections+1):
+            rospy.loginfo("TRY NUMBER "+str(i))
             if len(waypoints) > 0 and i < 1:
                 # this is good for doing gestures
                 plan, fraction = self.arm.compute_cartesian_path(waypoints, eef_step=0.01, jump_threshold=0.0)
@@ -403,30 +440,69 @@ class DaArmServer:
                 p = self.arm.get_current_pose()
                 p.pose.position = position
                 p.pose.orientation = orientation
+                rospy.loginfo("PLANNING TO "+str(p))
                 self.arm.set_pose_target(p)
-                plan = self.arm.plan()
-            if plan:
-                # get the last pose to correct if desired
-                ptPos = plan.joint_trajectory.points[-1].positions
-                # print "=================================="
-                # print "Last point of the current trajectory: "
-                angle_set = list()
-                for i in range(len(ptPos)):
-                    tempPos = ptPos[i]*180/np.pi + int(round((self.joint_angles[i] - ptPos[i]*180/np.pi)/(360)))*360
-                    angle_set.append(tempPos)
+                last_traj_goal = self.last_joint_trajectory_goal
+                rospy.loginfo("EXECUTING!")
+                plan = self.arm.go(wait = False)
+                timeout = 5/0.001
+                while self.last_joint_trajectory_goal == last_traj_goal:
+                    rospy.sleep(0.001)
+                    timeout -= 1
+                    if timeout <= 0:
+                        raise(Exception("Timeout waiting for kinova to accept movement goal."))
+                rospy.loginfo("KINOVA GOT THE MOVEMENT GOAL")
+                current_goal = self.last_joint_trajectory_goal
+                # then loop until a result for it gets published
+                timeout = 15/0.001
+                while self.last_joint_trajectory_result != current_goal:
+                    rospy.sleep(0.001)
+                    timeout -=1
+                    if timeout <= 0:
+                        raise(Exception("Motion took longer than 15 seconds. aborting..."))
+                    if self.paused is True:
+                        self.arm.stop()  # cancel the moveit goals
+                        return
+                rospy.loginfo("LEAVING THE WHILE LOOP")
+                # for i in range(corrections):
+                #     rospy.loginfo("Correcting the pose")
+                #     self.move_joint_angles(angle_set)
+                rospy.sleep(delay)
+                if(self.check_plan_result(p, self.arm.get_current_pose())):
+                    break #we're there, no need to retry
+                #rospy.loginfo("OK GOT THROUGH THE PLANNING PHASE")
+            if False:
+                # # get the last pose to correct if desired
+                # ptPos = plan.joint_trajectory.points[-1].positions
+                # # print "=================================="
+                # # print "Last point of the current trajectory: "
+                # angle_set = list()
+                # for i in range(len(ptPos)):
+                #     tempPos = ptPos[i]*180/np.pi + int(round((self.joint_angles[i] - ptPos[i]*180/np.pi)/(360)))*360
+                #     angle_set.append(tempPos)
 
                 if action_server:
                     pass
                     #action_server.publish_feedback(CalibrateFeedback("Plan Found"))
                 last_traj_goal = self.last_joint_trajectory_goal
+                rospy.loginfo("EXECUTING!")
                 self.arm.execute(plan, wait=False)
                 # this is a bit naive, but I'm going to loop until a new trajectory goal gets published
+                timeout = 5/0.001
                 while self.last_joint_trajectory_goal == last_traj_goal:
                     rospy.sleep(0.001)
+                    timeout -= 1
+                    if timeout <= 0:
+                        raise(Exception("Timeout waiting for kinova to accept movement goal."))
+                rospy.loginfo("KINOVA GOT THE MOVEMENT GOAL")
                 current_goal = self.last_joint_trajectory_goal
                 # then loop until a result for it gets published
+                timeout = 15/0.001
                 while self.last_joint_trajectory_result != current_goal:
                     rospy.sleep(0.001)
+                    timeout -=1
+                    if timeout <= 0:
+                        raise(Exception("Motion took longer than 15 seconds. aborting..."))
                     if self.paused is True:
                         self.arm.stop()  # cancel the moveit goals
                         return
@@ -474,7 +550,8 @@ class DaArmServer:
         self.last_joint_trajectory_result = message.status.goal_id.id
 
     def get_grasp_orientation(self, position):
-        return Quaternion(1, 0, 0, 0)
+        #return Quaternion(0, 0, 1/np.sqrt(2), 1/np.sqrt(2))
+        return Quaternion(-0.707388, -0.706825, 0.0005629, 0.0005633)
 
     def update_joints(self, joints):
         self.joint_angles = [joints.joint1, joints.joint2, joints.joint3,
@@ -489,13 +566,17 @@ class DaArmServer:
         # go to a spot and pick up a block
         # if check_grasp is true, it will check torque on gripper and retry or fail if not holding
         # open the gripper
+        # print('Position: ', position)
         self.open_gripper()
-        position = Point(location.x, location.y, self.grasp_height)
+        position = Point(location.x, location.y, 0.1)
         orientation = self.get_grasp_orientation(position)
         try:
             self.move_arm_to_pose(position, orientation, delay=0, action_server=action_server)
+            position = Point(location.x, location.y, self.grasp_height)
+            self.move_arm_to_pose(position, orientation, delay=0, action_server=action_server)
         except Exception as e:
-            raise(e)
+            raise(e) #problem because sometimes we get exception e.g. if we're already there
+            # and it will skip the close if so.
         if action_server:
             action_server.publish_feedback()
 
@@ -510,7 +591,9 @@ class DaArmServer:
     def place_block(self, location, check_grasp=False, delay=0, action_server=None):
         # go to a spot an drop a block
         # if check_grasp is true, it will check torque on gripper and fail if not holding a block
+        # print('Position: ', position)
         position = Point(location.x, location.y, self.drop_height)
+        rospy.loginfo("PLACE POSITION: "+str(position)+"(DROP HEIGHT: "+str(self.drop_height))
         orientation = self.get_grasp_orientation(position)
         try:
             self.move_arm_to_pose(position, orientation, delay=0, action_server=action_server)
