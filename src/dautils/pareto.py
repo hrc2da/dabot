@@ -1,3 +1,4 @@
+import numpy as np
 # stolen from https://stackoverflow.com/questions/32791911/fast-calculation-of-pareto-front-in-python
 def is_pareto_efficient_indexed(costs, return_mask=True):  # <- Fastest for many points
     """
@@ -37,15 +38,15 @@ def pareto_truncate(designs, outcomes):
             dominant_designs.append(designs[i])
             dominant_outcomes.append(outcomes[i])
         else:
-            nondominant_desings.append(designs[i])
+            nondominant_designs.append(designs[i])
             nondominant_outcomes.append(designs[i])
     return dominant_designs, dominant_outcomes, nondominant_designs, nondominant_outcomes
 
 def pareto_sort(designs, outcomes):
     # I'm a little unclear whether python passes lists by reference or value
     # just in case, let's copy
-    temp_designs = designs.copy()
-    temp_outcomes = outcomes.copy()
+    temp_designs = designs[:]
+    temp_outcomes = outcomes[:]
     tiered_designs= [] # list of pareto fronts
     tiered_outcomes = [] # parallel outcomes
     while len(temp_designs) > 0:

@@ -40,17 +40,18 @@ class DaArmServer:
     gestures = {}
     grasp_height = 0.05
     drop_height = 0.07
+    cruising_height = 0.1
     START_TOLERANCE = 0.05 # this is for moveit to check for change in joint angles before moving
-    GOAL_TOLERANCE = 0.01
+    GOAL_TOLERANCE = 0.005
     moving = False
     paused = False
     move_group_state = "IDLE"
     last_joint_trajectory_goal = ""
     last_joint_trajectory_result = ""
 
-    def __init__(self, num_planning_attempts=100):
+    def __init__(self, num_planning_attempts=100, safe_zone = None):
         rospy.init_node("daarm_server", anonymous=True)
-
+        self.safe_zone = safe_zone # this is a fallback zone to drop a block on fail if nothing is passed: [{x,y},{xT,yT}]
         self.init_params()
         self.init_scene()
         self.init_publishers()
@@ -79,35 +80,52 @@ class DaArmServer:
         rospy.sleep(0.5)
         self.tuiPose = PoseStamped()
         self.tuiPose.header.frame_id = self.robot.get_planning_frame()
+        self.tuiPose.pose.position = Point(0.0056, -0.343, -0.51)
+        self.tuiDimension = (0.9906, 0.8382, 0.8636)
+        self.blockProtectorPose = PoseStamped()
+        self.blockProtectorPose.header.frame_id = self.robot.get_planning_frame()
+        self.blockProtectorPose.pose.position = Point(0.0056, -0.343, -0.51+ self.cruising_height)
+        self.blockProtectorDimension = (0.9906, 0.8382, 0.8636)
         self.wallPose = PoseStamped()
         self.wallPose.header.frame_id = self.robot.get_planning_frame()
-        self.tuiPose.pose.position = Point(0.3556, -0.343, -0.51)
-        self.tuiDimension = (0.9906, 0.8382, 0.8636)
-        self.wallPose.pose.position = Point(-0.508, -0.343, -0.3048)
+        self.wallPose.pose.position = Point(-0.858, -0.343, -0.3048)
         self.wallDimension = (0.6096, 2, 1.35)
+        self.farWallPose = PoseStamped()
+        self.farWallPose.header.frame_id = self.robot.get_planning_frame()
+        self.farWallPose.pose.position = Point(0.9, -0.343, -0.3048)
+        self.farWallDimension = (0.6096, 2, 3.35)
         rospy.sleep(0.5)
         self.scene.add_box("tui", self.tuiPose, self.tuiDimension)
         self.scene.add_box("wall", self.wallPose, self.wallDimension)
+        self.scene.add_box("farWall", self.farWallPose, self.farWallDimension)
+    
+    def raise_table(self):
+        #raises the table obstacle to protect blocks on the table during transport
+        self.scene.add_box("blockProtector", self.blockProtectorPose, self.blockProtectorDimension)
+
+    def lower_table(self):
+        #lowers the table to allow grasping into it
+        self.scene.remove_world_object("blockProtector")
 
     def init_params(self):
         try:
             self.grasp_height = get_ros_param("GRASP_HEIGHT", "Grasp height defaulting to 0.01")
             self.drop_height = get_ros_param("DROP_HEIGHT", "Drop height defaulting to 0.07")
+            self.cruising_height = get_ros_param("CRUISING_HEIGHT", "Cruising height defaulting to 0.1")
         except ValueError as e:
             rospy.loginfo(e)
     def handle_param_update(self, message):
         self.init_params()
 
     def init_publishers(self):
-        self.calibration_publisher = rospy.Publisher("/calibration_results", CalibrationParams)
+        self.calibration_publisher = rospy.Publisher("/calibration_results", CalibrationParams, queue_size=1)
         self.action_belief_publisher = rospy.Publisher("/arm_action_beliefs", String, queue_size=1)
         rospy.sleep(0.5)
 
     def init_subscribers(self):
         self.joint_angle_subscriber = rospy.Subscriber(
             '/j2s7s300_driver/out/joint_angles', JointAngles, self.update_joints)
-        # self.move_it_feedback_subscriber = rospy.Subscriber(
-        #     '/move_group/feedback', MoveGroupActionFeedback, self.update_move_group_state)
+        
         self.joint_trajectory_subscriber = rospy.Subscriber(
             '/j2s7s300/follow_joint_trajectory/status', GoalStatusArray, self.update_joint_trajectory_state)
 
@@ -117,7 +135,15 @@ class DaArmServer:
         self.joint_trajectory_result_subscriber = rospy.Subscriber(
             '/j2s7s300/follow_joint_trajectory/result', FollowJointTrajectoryActionResult, self.update_joint_trajectory_result)
 
+        self.finger_position_subscriber = rospy.Subscriber(
+            '/j2s7s300_driver/out/finger_position', FingerPosition, self.update_finger_position)
+
         self.param_update_subscriber = rospy.Subscriber("/param_update", String, self.handle_param_update)
+
+        self.moveit_status_subscriber = rospy.Subscriber(
+            '/move_group/status', GoalStatusArray, self.update_move_group_status)
+        self.move_it_feedback_subscriber = rospy.Subscriber(
+             '/move_group/feedback', MoveGroupActionFeedback, self.update_move_group_state)
 
     def init_action_servers(self):
         self.calibration_server = actionlib.SimpleActionServer(
@@ -262,15 +288,11 @@ class DaArmServer:
             self.joint_action_client.cancel_all_goals()
             return None
 
-    def handle_move_block(self, message, pick_tries=1, place_tries=1):
+    def handle_move_block(self, message):
         """msg format: {id: int,
                         source: Point {x: float,y: float},
                         target: Point {x: float, y: float}
         """
-        
-        block_response = json.loads(self.get_block_state(TuiStateRequest('tuio')).tui_state)
-        current_block_state = block_response
-
         print(message)
 
         pick_x = message.source.x
@@ -278,54 +300,122 @@ class DaArmServer:
         pick_x_threshold = message.source_x_tolerance
         pick_y_threshold = message.source_y_tolerance
         block_id = message.id
-        candidate_blocks = []
-
-        # get candidate blocks -- blocks with the same id and within the error bounds/threshold given
-        print(current_block_state)
-        for block in current_block_state:
-            print(block, self.check_block_bounds(block['x'], block['y'], pick_x, pick_y, pick_x_threshold, pick_y_threshold))
-            if block['id'] == block_id and self.check_block_bounds(block['x'], block['y'], pick_x, pick_y, pick_x_threshold, pick_y_threshold):
-                candidate_blocks.append(block)
-
-        # select best block to pick and pick up
-        pick_location = None
-        if len(candidate_blocks) == 1:
-            pick_location = Point(candidate_blocks[0]['x'], candidate_blocks[0]['y'],0)
-        else:
-            pick_location = Point(self.find_most_isolated_block(candidate_blocks, current_block_state))
-        for i in range(pick_tries):
-            try:
-                arm_pick_location = tuio_to_arm(pick_location.x, pick_location.y, get_tuio_bounds(), get_arm_bounds())
-                self.pick_block(location=Point(arm_pick_location[0], arm_pick_location[1], 0))
-                break
-            except Exception as e:
-                if i < pick_tries:
-                    print("pick failed and trying again...",e)
-                else:
-                    print("pick failed and out of attempts...",e)
-                    return
 
         place_x = message.target.x
         place_y = message.target.y
         place_x_threshold = message.target_x_tolerance
         place_y_threshold = message.target_y_tolerance
+        self.move_block(block_id,pick_x,pick_y,pick_x_threshold,pick_y_threshold,place_x,place_y,place_x_threshold,place_y_threshold,message.block_size)
 
-        # calculate drop location
+    def handle_pick_failure(self):
+        rospy.loginfo("Pick failed, going home.")
+        self.open_gripper()
+        self.home_arm_kinova()
+
+
+    def handle_place_failure(self,safe_zone,block_size):
+        #should probably figure out if I'm holding the block first so it doesn't look weird
+        #figure out how to drop the block somewhere safe
+        rospy.loginfo("HANDLING PLACE FAILURE")
+        block_response = json.loads(self.get_block_state('tuio').tui_state)
+        current_block_state = block_response
         drop_location = self.calculate_drop_location(
-            place_x, place_y, place_x_threshold, place_y_threshold, current_block_state, message.block_size, num_attempts=100)
-        print("tuio drop", drop_location)
+            safe_zone[0]['x'], safe_zone[0]['y'], safe_zone[1]['x_tolerance'], safe_zone[1]['y_tolerance'], current_block_state, block_size, num_attempts=1000)
+        try:
+            arm_drop_location = tuio_to_arm(drop_location.x, drop_location.y, get_tuio_bounds(), get_arm_bounds())
+            rospy.loginfo("panic arm drop: "+str(arm_drop_location))
+            self.place_block(Point(arm_drop_location[0], arm_drop_location[1], 0))
+        except Exception as e:
+            rospy.loginfo("ERROR: Cannot panic place the block! Get ready to catch it!")
+            self.open_gripper()
+        self.home_arm_kinova()
+
+    def get_candidate_blocks(self,block_id,pick_x,pick_y,pick_x_tolerance,pick_y_tolerance):
+        block_response = json.loads(self.get_block_state('tuio').tui_state)
+        current_block_state = block_response
+
+        candidate_blocks = []
+        print("looking for ",block_id," ",pick_x,pick_y,pick_x_tolerance,pick_y_tolerance)
+        # get candidate blocks -- blocks with the same id and within the error bounds/threshold given
+        print(current_block_state)
+        for block in current_block_state:
+            print(block, self.check_block_bounds(block['x'], block['y'], pick_x, pick_y, pick_x_tolerance, pick_y_tolerance))
+            if block['id'] == block_id and self.check_block_bounds(block['x'], block['y'], pick_x, pick_y, pick_x_tolerance, pick_y_tolerance):
+                candidate_blocks.append(block)
+        return candidate_blocks
+
+    def move_block(self,block_id,pick_x,pick_y,pick_x_tolerance,pick_y_tolerance,place_x,place_y,
+        place_x_tolerance,place_y_tolerance,block_size = None, safe_zone = None, pick_tries=2, place_tries=1):
+        
+        if block_size is None:
+            block_size = get_ros_param('DEFAULT_BLOCK_SIZE')
+        block_response = json.loads(self.get_block_state('tuio').tui_state)
+        current_block_state = block_response
+
+
+        candidate_blocks = []
+        print("looking for ",block_id," ",pick_x,pick_y,pick_x_tolerance,pick_y_tolerance)
+        # get candidate blocks -- blocks with the same id and within the error bounds/threshold given
+        print(current_block_state)
+        for block in current_block_state:
+            print(block, self.check_block_bounds(block['x'], block['y'], pick_x, pick_y, pick_x_tolerance, pick_y_tolerance))
+            if block['id'] == block_id and self.check_block_bounds(block['x'], block['y'], pick_x, pick_y, pick_x_tolerance, pick_y_tolerance):
+                candidate_blocks.append(block)
+
+        # also check for a drop location before trying to pick
+        drop_location = self.calculate_drop_location(
+            place_x, place_y, place_x_tolerance, place_y_tolerance, current_block_state, block_size, num_attempts=1000)
+
+        # select best block to pick and pick up
+        pick_location = None
+        if len(candidate_blocks) < 1:
+            raise Exception("no block of id "+str(block_id)+" found within the source zone")
+        elif drop_location == None:
+            raise Exception("no room in the target zone to drop the block")
+        elif len(candidate_blocks) == 1:
+            pick_location = Point(candidate_blocks[0]['x'], candidate_blocks[0]['y'],0)
+        else:
+            pick_location = Point(*self.find_most_isolated_block(candidate_blocks, current_block_state))
+        for i in range(pick_tries):
+            try:
+                arm_pick_location = tuio_to_arm(pick_location.x, pick_location.y, get_tuio_bounds(), get_arm_bounds())
+                self.pick_block(location=Point(arm_pick_location[0], arm_pick_location[1], 0), check_grasp=True)
+                break
+            except Exception as e:
+                if i < pick_tries-1:
+                    rospy.loginfo("pick failed and trying again..."+str(e))
+                else:
+                    rospy.loginfo("pick failed and out of attempts..."+str(e))
+                    self.handle_pick_failure()
+                    raise(e)
+
+        
+        # calculate drop location
+        
+        block_response = json.loads(self.get_block_state('tuio').tui_state)
+        current_block_state = block_response
+        drop_location = self.calculate_drop_location(
+            place_x, place_y, place_x_tolerance, place_y_tolerance, current_block_state, block_size, num_attempts=1000)
+        rospy.loginfo("tuio drop"+str(drop_location))
         for i in range(place_tries):
             try:
                 arm_drop_location = tuio_to_arm(drop_location.x, drop_location.y, get_tuio_bounds(), get_arm_bounds())
-                print("arm drop: ", arm_drop_location)
+                rospy.loginfo("arm drop: "+str(arm_drop_location))
                 self.place_block(Point(arm_drop_location[0], arm_drop_location[1], 0))
                 break
             except Exception as e:
-                if i < pick_tries:
-                    print("place failed and trying again...", e)
+                if i < place_tries-1:
+                    rospy.loginfo("place failed and trying again..."+str(e))
                 else:
-                    print("place failed and out of attempts...", e)
-                    return
+                    rospy.loginfo("place failed and out of attempts..."+str(e))
+                    # check to see if we've defined a safe zone to drop the blocks
+                    if safe_zone == None:
+                        if self.safe_zone == None:
+                            safe_zone = [{'x':pick_x,'y':pick_y},{'x_tolerance':pick_x_tolerance,'y_tolerance':pick_y_tolerance}]
+                        else:
+                            safe_zone = self.safe_zone
+                    self.handle_place_failure(safe_zone,block_size)
+                    raise(e)
         # assume success if we made it this far
         self.move_block_server.set_succeeded(MoveBlockResult(drop_location))
         
@@ -345,7 +435,7 @@ class DaArmServer:
         while(attempt < num_attempts):
             valid = True
             for block in blocks:
-                if self.check_block_bounds(block['x'], block['y'], x, y, block_size / 2, block_size / 2):
+                if self.check_block_bounds(block['x'], block['y'], x, y, block_size, block_size):
                     valid = False
                     break
             if valid:
@@ -354,6 +444,8 @@ class DaArmServer:
                 x = random.uniform(x_original - x_threshold, x_original + x_threshold)
                 y = random.uniform(y_original - y_threshold, y_original + y_threshold)
             attempt += 1
+        #if none found in num_attempts, return none
+        return None
 
     # candidates should have more than one element in it
     @staticmethod
@@ -366,16 +458,29 @@ class DaArmServer:
                 if block['x'] == candidate['x'] and block['y'] == candidate['y']:
                     continue
                 else:
-                    dist = self.block_dist(candidate, block)
+                    dist = DaArmServer.block_dist(candidate, block)
                     if min_dist == -1 or dist < min_dist:
                         min_dist = dist
-            min_distances.append(candidate, min_dist)
+            min_distances.append([candidate, min_dist])
         most_isolated, _ = max(min_distances, key=lambda x: x[1])  # get most isolated candidate, and min_distance
         return most_isolated['x'], most_isolated['y'], 0
 
     @staticmethod
     def block_dist(block_1, block_2):
         return np.sqrt((block_2['x'] - block_1['x'])**2 + (block_2['y'] - block_1['y'])**2)
+
+    def update_finger_position(self,message):
+        self.finger_positions = [message.finger1,message.finger2,message.finger3]
+
+    def check_grasp(self):
+        closed_pos = 0.95*6800
+        distance_from_closed = 0
+        for fp in self.finger_positions:
+            distance_from_closed += (closed_pos-fp)**2
+        if np.sqrt(distance_from_closed) > 130: #this is just some magic number for now
+            return True #if the fingers aren't fully closed, then grasp is good
+        else:
+            return False
 
     def open_gripper(self, delay=0):
         """open the gripper ALL THE WAY, then delay
@@ -385,7 +490,7 @@ class DaArmServer:
             self.gripper.go()
         else:
             try:
-                rospy.loginfo("TRYING IT!!")
+                rospy.loginfo("Opening Gripper!!")
                 self.move_fingers(50, 50, 50)
             except Exception as e:
                 rospy.loginfo("Caught it!!"+str(e))
@@ -397,8 +502,8 @@ class DaArmServer:
         # self.gripper.set_named_target("Close")
         # self.gripper.go()
         try:
-            rospy.loginfo("TRYING IT!!")
-            self.move_fingers(80, 80, 80)
+            rospy.loginfo("Closing Gripper!!")
+            self.move_fingers(95, 95, 95)
         except Exception as e:
             rospy.loginfo("Caught it!!"+str(e))
         rospy.sleep(delay)
@@ -430,7 +535,7 @@ class DaArmServer:
         print("tolerable error")
         return True
     # expects cooridinates for position to be in arm space
-    def move_arm_to_pose(self, position, orientation, delay=0.5, waypoints=[], corrections=1, action_server=None):
+    def move_arm_to_pose(self, position, orientation, delay=0.5, waypoints=[], corrections=4, action_server=None):
         for i in range(corrections+1):
             rospy.loginfo("TRY NUMBER "+str(i))
             if len(waypoints) > 0 and i < 1:
@@ -454,12 +559,12 @@ class DaArmServer:
                 rospy.loginfo("KINOVA GOT THE MOVEMENT GOAL")
                 current_goal = self.last_joint_trajectory_goal
                 # then loop until a result for it gets published
-                timeout = 15/0.001
+                timeout = 90/0.001
                 while self.last_joint_trajectory_result != current_goal:
                     rospy.sleep(0.001)
                     timeout -=1
                     if timeout <= 0:
-                        raise(Exception("Motion took longer than 15 seconds. aborting..."))
+                        raise(Exception("Motion took longer than 90 seconds. aborting..."))
                     if self.paused is True:
                         self.arm.stop()  # cancel the moveit goals
                         return
@@ -533,6 +638,11 @@ class DaArmServer:
     def update_move_group_state(self, message):
         rospy.loginfo(message.feedback.state)
         self.move_group_state = message.feedback.state
+    
+    def update_move_group_status(self, message):
+        if message.status_list:
+            #rospy.loginfo("MoveGroup Status for "+str(message.status_list[0].goal_id.id)+": "+str(message.status_list[0].status))
+            self.move_group_status = message.status_list[0].status
 
     def update_joint_trajectory_state(self, message):
         # print(message.status_list)
@@ -557,9 +667,14 @@ class DaArmServer:
         self.joint_angles = [joints.joint1, joints.joint2, joints.joint3,
                              joints.joint4, joints.joint5, joints.joint6, joints.joint7]
 
-    def move_z(self, distance):
+    def move_z_relative(self, distance):
         p = self.arm.get_current_pose()
         p.pose.position.z += distance
+        self.move_arm_to_pose(p.pose.position, p.pose.orientation, delay=0)
+    
+    def move_z_absolute(self, height):
+        p = self.arm.get_current_pose()
+        p.pose.position.z = height
         self.move_arm_to_pose(p.pose.position, p.pose.orientation, delay=0)
 
     def pick_block(self, location, check_grasp=False, retry_attempts=0, delay=0, action_server=None):
@@ -568,41 +683,57 @@ class DaArmServer:
         # open the gripper
         # print('Position: ', position)
         self.open_gripper()
-        position = Point(location.x, location.y, 0.1)
+        position = Point(location.x, location.y, self.cruising_height)
         orientation = self.get_grasp_orientation(position)
         try:
+            self.raise_table()
             self.move_arm_to_pose(position, orientation, delay=0, action_server=action_server)
+            self.lower_table()
             position = Point(location.x, location.y, self.grasp_height)
             self.move_arm_to_pose(position, orientation, delay=0, action_server=action_server)
         except Exception as e:
+            self.lower_table()
             raise(e) #problem because sometimes we get exception e.g. if we're already there
             # and it will skip the close if so.
         if action_server:
             action_server.publish_feedback()
+        
+        self.close_gripper()
+        self.move_z_absolute(self.cruising_height)
 
         if check_grasp is True:
-            pass  # for now, but we want to check finger torques
+            if(self.check_grasp() is False):
+                print("Grasp failed!")
+                self.lower_table()
+                raise(Exception("grasp failed!"))
+            # for now, but we want to check finger torques
             # for i in range(retry_attempts):
             #     self.move_z(0.3)
-        self.close_gripper()
-        self.move_z(0.1)
+        
         rospy.sleep(delay)
 
     def place_block(self, location, check_grasp=False, delay=0, action_server=None):
         # go to a spot an drop a block
         # if check_grasp is true, it will check torque on gripper and fail if not holding a block
         # print('Position: ', position)
-        position = Point(location.x, location.y, self.drop_height)
+        current_pose = self.arm.get_current_pose()
+        if current_pose.pose.position.z - self.cruising_height < -.02: # if I'm significantly below cruisng height, correct
+            self.move_z_absolute(self.cruising_height)
+        position = Point(location.x, location.y, self.cruising_height)
         rospy.loginfo("PLACE POSITION: "+str(position)+"(DROP HEIGHT: "+str(self.drop_height))
         orientation = self.get_grasp_orientation(position)
         try:
+            self.raise_table()
             self.move_arm_to_pose(position, orientation, delay=0, action_server=action_server)
+            self.lower_table()
+            self.move_z_absolute(self.drop_height)
         except Exception as e:
+            self.lower_table()
             raise(e)
         if action_server:
             action_server.publish_feedback()
         self.open_gripper()
-        self.move_z(0.1)
+        self.move_z_absolute(self.cruising_height)
         self.close_gripper()
 
     def stop_motion(self, home=False, pause=False):

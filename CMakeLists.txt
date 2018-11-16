@@ -63,8 +63,9 @@ add_service_files(
    FILES
    TuiState.srv
    ArmCommand.srv
-#   Service1.srv
-#   Service2.srv
+   TargetDesign.srv
+   SleepControl.srv
+   FindEossBlock.srv
 )
 
 ## Generate actions in the 'action' folder
@@ -74,6 +75,7 @@ add_service_files(
 #   Action2.action
     Calibrate.action
     MoveBlock.action
+    MoveEossBlock.action
     MovePose.action
  )
 

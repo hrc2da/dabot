@@ -1,0 +1,10 @@
+#goal
+int32 id 
+int32 source
+int32 target
+---
+#result
+string success
+---
+#feedback
+int8 step #the step number of the move sequence

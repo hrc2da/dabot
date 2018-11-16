@@ -3,7 +3,9 @@ import actionlib
 from dabot.msg import CalibrateAction, CalibrateGoal
 
 
-def get_ros_param(param, err_msg):
+def get_ros_param(param, err_msg=""):
+    if err_msg == "":
+        err_msg = "error getting rosparam "+param
     if(rospy.has_param(param)):
         return rospy.get_param(param)
     else:
