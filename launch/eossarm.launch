@@ -4,4 +4,5 @@
     <node pkg="dabot" type="eossarm_server.py" name="eossarm_server" output="screen" />
     <node pkg="dabot" type="eoss_local_search_agent.py" name="eoss_local_search_agent" output="screen" />
     <node pkg="dabot" type="eoss_builder.py" name="eoss_builder" output="screen" />
+    <node pkg="dabot" type="eoss_preference_learner.py" name="eoss_preference_learner" output="screen" />
 </launch>
