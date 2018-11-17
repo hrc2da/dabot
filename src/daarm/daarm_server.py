@@ -357,21 +357,24 @@ class DaArmServer:
         print("looking for ",block_id," ",pick_x,pick_y,pick_x_tolerance,pick_y_tolerance)
         # get candidate blocks -- blocks with the same id and within the error bounds/threshold given
         print(current_block_state)
+        # check for a drop location before trying to pick, do this before checking source to prevent cases where we go for a block user 
+        # moved while we are checking for a drop location
+        drop_location = self.calculate_drop_location(
+            place_x, place_y, place_x_tolerance, place_y_tolerance, current_block_state, block_size, num_attempts=1000)
+
+        if drop_location == None:
+            raise Exception("no room in the target zone to drop the block")
+
         for block in current_block_state:
             print(block, self.check_block_bounds(block['x'], block['y'], pick_x, pick_y, pick_x_tolerance, pick_y_tolerance))
             if block['id'] == block_id and self.check_block_bounds(block['x'], block['y'], pick_x, pick_y, pick_x_tolerance, pick_y_tolerance):
                 candidate_blocks.append(block)
 
-        # also check for a drop location before trying to pick
-        drop_location = self.calculate_drop_location(
-            place_x, place_y, place_x_tolerance, place_y_tolerance, current_block_state, block_size, num_attempts=1000)
-
         # select best block to pick and pick up
         pick_location = None
         if len(candidate_blocks) < 1:
             raise Exception("no block of id "+str(block_id)+" found within the source zone")
-        elif drop_location == None:
-            raise Exception("no room in the target zone to drop the block")
+        
         elif len(candidate_blocks) == 1:
             pick_location = Point(candidate_blocks[0]['x'], candidate_blocks[0]['y'],0)
         else:
@@ -445,7 +448,7 @@ class DaArmServer:
                 y = random.uniform(y_original - y_threshold, y_original + y_threshold)
             attempt += 1
         #if none found in num_attempts, return none
-        return None
+        except "Couldn't find a place to drop the block in the given point, bounds configuration afer "+num_attempts+" tries"
 
     # candidates should have more than one element in it
     @staticmethod
