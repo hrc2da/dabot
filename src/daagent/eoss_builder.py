@@ -13,7 +13,7 @@ import rospy
 import actionlib
 from std_msgs.msg import String
 from dabot.msg import MoveEossBlockAction, MoveEossBlockGoal
-from dabot.srv import TargetDesign, SleepControl, SleepControlResponse, TuiState
+from dabot.srv import TargetDesign, SleepControl, SleepControlResponse, TuiState, ArmCommand
 from dautils import calibrate_arm
 from dautils.pareto import pareto_sort
 from kinova_msgs.msg import *
@@ -54,7 +54,7 @@ class EossBuilder:
     building = False
     awake = False
     single_sensor_file_path = "config/single_sensor_outcomes.csv"
-    build_delay = 1
+    build_delay = 5.0
 
     def __init__(self):
         # self.agent_ready_subscriber = rospy.Subscriber("/agent_ready", String, self.handle_agent_ready)
@@ -72,18 +72,19 @@ class EossBuilder:
         self.eoss_action_client.wait_for_server()
         rospy.loginfo('Connected to MoveEossBlockActionServer')
         self.status_publisher = rospy.Publisher("eoss_builder_status", String, queue_size=1)
+        self.return_failed_config_publisher = rospy.Publisher("eoss_remove_from_visited", String, queue_size=1)
 
         # Service for homing the arm
-        home_arm_service = '/j2s7s300_driver/in/home_arm'
-        self.home_arm_client = rospy.ServiceProxy(home_arm_service, HomeArm)
+        # home_arm_service = '/j2s7s300_driver/in/home_arm'
+        home_arm_service = '/home_arm'
+        self.home_arm_client = rospy.ServiceProxy(home_arm_service, ArmCommand)
         rospy.loginfo('Waiting for kinova home arm service')
         rospy.wait_for_service(home_arm_service)
         rospy.loginfo('Kinova home arm service server connected')
-        
+        self.home_arm_client()
 
         # main loop
         while not rospy.is_shutdown():
-            rospy.sleep(5.0)
             if self.awake is True:
                 #print("awake")
                 # get a design from the search agent
@@ -152,6 +153,7 @@ class EossBuilder:
             if self.awake is False:
                 rospy.loginfo("Went to sleep while performing build; canceling remaining moves")
                 self.status_publisher.publish(String("Went to sleep while performing build; canceling remaining moves"))
+                #self.return_failed_config_publisher.publish(String(design))
                 return
                 break
             self.eoss_action_client.send_goal(MoveEossBlockGoal(*move))
@@ -163,6 +165,7 @@ class EossBuilder:
                 else:
                     rospy.loginfo("Build failed on "+str(move))
                     self.status_publisher.publish(String("Build failed on "+str(move)+": "+result.success))
+                    #self.return_failed_config_publisher.publish(String(design))
                     return
                     break
                     #raise Exception("Build failed")
@@ -171,6 +174,7 @@ class EossBuilder:
                 self.eoss_action_client.cancel_all_goals()
                 rospy.loginfo("Build timed out on "+str(move))
                 self.status_publisher.publish(String("Build timed out on "+str(move)))
+                #self.return_failed_config_publisher.publish(String(design))
                 return
                 break
         self.status_publisher.publish(String("Build was successful!"))

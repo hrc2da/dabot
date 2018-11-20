@@ -78,7 +78,7 @@ class EossStateTracker(TuiStateTracker):
 
     def publish_config(self, message):
         # the point of this is to allow us to compare with /configs (which may have local search points as well)
-        rospy.sleep(0.05)
+        rospy.sleep(0.005)
         self.config_publisher.publish(String(self.blocks2bitstring(self.block_state)))
 
     def shutdown_tracker(self):
