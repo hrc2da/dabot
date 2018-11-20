@@ -22,6 +22,7 @@ bitstring_to_actions = EossBuilder.bitstring_to_actions
 from random import randint
 
 class EossLocalSearchAgent:
+    preference_aware = False
     configurations = []
     evaluations = []
     attempted = [] # keep a visited list to avoid repeating moves
@@ -29,10 +30,13 @@ class EossLocalSearchAgent:
     pareto_evaluations = []
     eval_dict = {}
     criteria = [lambda(x): x[0] < 5000 and x[1] < -0.15]
-
+    preference_belief = {"science":0.5,"cost":0.5}
     def __init__(self):
         rospy.init_node("eoss_local_search_agent", anonymous=False)
         self.evaluated_config_listener = rospy.Subscriber("/configs", String, self.update_configurations)
+        self.remove_from_visited_listener = rospy.Subscriber("/eoss_remove_from_visited", String, self.remove_from_visited)
+        self.preference_subscriber = rospy.Subscriber("/eoss_preference_belief", String, self.handle_preference_update)
+        self.builder_publisher = rospy.Publisher("/eoss_builder_status", String, queue_size=1)
         # self.ready_publisher = rospy.Publisher("/agent_ready", String, queue_size=1)
         # Service to get TUI State
         rospy.wait_for_service('get_config_state')
@@ -44,6 +48,9 @@ class EossLocalSearchAgent:
         #service to get the best current design
         self.get_target_design_service = rospy.Service("/get_agent_design", TargetDesign, self.handle_get_target_design)
 
+    def handle_preference_update(self, message):
+        self.preference_belief = json.loads(message.data)
+    
     def update_configurations(self, message):
         new_config = json.loads(message.data)
         if(self.eval_dict.get(new_config["config"],None) != None):
@@ -88,11 +95,30 @@ class EossLocalSearchAgent:
         # choose one and return it, not sure if I have to cast to int here, but just being safe
         shortest_move = min(map(int,sorted_front))
         choices = sorted_front[str(shortest_move)]
-        choice = randint(0,len(choices)-1)
-        self.attempted.append(choices[choice])
-        choice_outcomes = self.eval_dict.get(choices[choice])
-        return TargetDesignResponse(choices[choice],choice_outcomes[0],-choice_outcomes[1])
+        #choice = randint(0,len(choices)-1)
+        #chosen = choices[choice]
+        preference_belief = ""
+        if self.preference_aware == False:
+            chosen = choices[randint(0,len(choices)-1)]
+            preference_belief = "Disabled"
+        elif self.preference_belief["science"] > self.preference_belief["cost"]: #be careful, preferences are science, cost, everything else is cost, science
+            chosen = self.get_max_science(choices)
+            preference_belief = "Science"
+        elif self.preference_belief["science"] < self.preference_belief["cost"]:
+            chosen = self.get_min_cost(choices)
+            preference_belief = "Cost"
+        else:
+            chosen = choices[randint(0,len(choices)-1)]
+            preference_belief = "None"
+        self.attempted.append(chosen)
+        choice_outcomes = self.eval_dict.get(chosen)
+        if self.preference_aware == True:
+            self.builder_publisher.publish(String("Current Preference Belief is: "+preference_belief+" -- "+str(self.preference_belief)))
+        return TargetDesignResponse(chosen,choice_outcomes[0],-choice_outcomes[1])
 
+
+    def remove_from_visited(self, message):
+        self.attempted.remove(message.data)
  
 
     def get_undoable_moves(self,target_bitstring):
@@ -138,7 +164,27 @@ class EossLocalSearchAgent:
                 designs_by_moves[key] = [designs_to_sort[i]]
         return designs_by_moves
 
+    def get_max_science(self, designs):
+        designs_to_sort = designs[:]
+        sciences = [-self.eval_dict[d][1] for d in designs_to_sort]
+        max_science = sciences[0]
+        max_science_index = 0
+        for i,s in enumerate(sciences):
+            if s > max_science:
+                max_science = s
+                max_science_index = i
+        return designs_to_sort[max_science_index]
     
+    def get_min_cost(self, designs):
+        designs_to_sort = designs[:]
+        costs = [self.eval_dict[d][0] for d in designs_to_sort]
+        min_cost = costs[0]
+        min_cost_index = 0
+        for i,c in enumerate(costs):
+            if c > min_cost:
+                min_cost = c
+                min_cost_index = i
+        return designs_to_sort[min_cost_index]
 
     # stolen from https://stackoverflow.com/questions/32791911/fast-calculation-of-pareto-front-in-python
     # def is_pareto_efficient_indexed(self, costs, return_mask=True):  # <- Fastest for many points
