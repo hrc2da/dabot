@@ -25,7 +25,7 @@ from geometry_msgs.msg import Point, Quaternion, PoseStamped
 from std_msgs.msg import String
 from kinova_msgs.msg import *
 from kinova_msgs.srv import *
-from moveit_commander import RobotCommander, MoveGroupCommander, PlanningSceneInterface
+from moveit_commander import RobotCommander, MoveGroupCommander, PlanningSceneInterface, MoveItCommanderException
 from moveit_msgs.msg import MoveGroupActionFeedback
 from actionlib_msgs.msg import GoalStatusArray
 from control_msgs.msg import FollowJointTrajectoryActionGoal, FollowJointTrajectoryActionResult
@@ -60,7 +60,7 @@ class DaArmServer:
         self.init_service_clients()
         self.init_arm(num_planning_attempts)
 
-    def init_arm(self, num_planning_attempts=100):
+    def init_arm(self, num_planning_attempts=700):
         rospy.set_param("/move_group/trajectory_execution/allowed_start_tolerance", self.START_TOLERANCE)
         self.arm = MoveGroupCommander("arm")
         self.gripper = MoveGroupCommander("gripper")
@@ -72,7 +72,7 @@ class DaArmServer:
         self.init_action_servers()
 
     def init_scene(self):
-        world_objects = ["table", "tui", "monitor", "overhead", "wall"]
+        world_objects = ["table", "tui", "monitor", "overHead", "wall", "farWall", "backWall", "blockProtector", "rearCamera"]
         self.robot = RobotCommander()
         self.scene = PlanningSceneInterface()
         for obj in world_objects:
@@ -81,7 +81,11 @@ class DaArmServer:
         self.tuiPose = PoseStamped()
         self.tuiPose.header.frame_id = self.robot.get_planning_frame()
         self.tuiPose.pose.position = Point(0.0056, -0.343, -0.51)
-        self.tuiDimension = (0.9906, 0.8382, 0.8636)
+        self.tuiDimension = (0.9906, 0.8382, 0.8836)
+        self.overHeadPose = PoseStamped()
+        self.overHeadPose.header.frame_id = self.robot.get_planning_frame()
+        self.overHeadPose.pose.position = Point(0.0056, 0.0, 0.97)
+        self.overHeadDimension = (0.9906,0.8382, 0.05)
         self.blockProtectorPose = PoseStamped()
         self.blockProtectorPose.header.frame_id = self.robot.get_planning_frame()
         self.blockProtectorPose.pose.position = Point(0.0056, -0.343, -0.51+ self.cruising_height)
@@ -94,13 +98,24 @@ class DaArmServer:
         self.farWallPose.header.frame_id = self.robot.get_planning_frame()
         self.farWallPose.pose.position = Point(0.9, -0.343, -0.3048)
         self.farWallDimension = (0.6096, 2, 3.35)
+        self.backWallPose = PoseStamped()
+        self.backWallPose.header.frame_id = self.robot.get_planning_frame()
+        self.backWallPose.pose.position = Point(0.0056,0.55,-0.51)
+        self.backWallDimension = (1,0.005,4)
+        self.rearCameraPose = PoseStamped()
+        self.rearCameraPose.header.frame_id = self.robot.get_planning_frame()
+        self.rearCameraPose.pose.position = Point(0.65,0.45,-0.51)
+        self.rearCameraDimension = (0.5,0.5,2)
         rospy.sleep(0.5)
         self.scene.add_box("tui", self.tuiPose, self.tuiDimension)
         self.scene.add_box("wall", self.wallPose, self.wallDimension)
         self.scene.add_box("farWall", self.farWallPose, self.farWallDimension)
-    
+        self.scene.add_box("overHead", self.overHeadPose, self.overHeadDimension)
+        self.scene.add_box("backWall", self.backWallPose, self.backWallDimension)
+        self.scene.add_box("rearCamera", self.rearCameraPose, self.rearCameraDimension)
     def raise_table(self):
         #raises the table obstacle to protect blocks on the table during transport
+        self.scene.remove_world_object("blockProtector")
         self.scene.add_box("blockProtector", self.blockProtectorPose, self.blockProtectorDimension)
 
     def lower_table(self):
@@ -234,7 +249,7 @@ class DaArmServer:
 
     def handle_home_arm(self, message):
         try:
-            status = self.home_arm_kinova()
+            status = self.home_arm()
             return json.dumps(status)
         except rospy.ServiceException as e:
             rospy.loginfo("Homing arm failed")
@@ -242,17 +257,41 @@ class DaArmServer:
     def home_arm(self):
         # send the arm home
         # for now, let's just use the kinova home
-        self.home_arm_client()
+        #self.home_arm_client()
+        self.home_arm_kinova()
+        return "done"
+
+    def custom_home_arm(self):
+        angles_set = [629.776062012,150.076568694,-0.13603515923,29.8505859375,0.172727271914,212.423721313,539.743164062]
+        goal = kinova_msgs.msg.ArmJointAnglesGoal()
+        
+        goal.angles.joint1 = angles_set[0]
+        goal.angles.joint2 = angles_set[1]
+        goal.angles.joint3 = angles_set[2]
+        goal.angles.joint4 = angles_set[3]
+        goal.angles.joint5 = angles_set[4]
+        goal.angles.joint6 = angles_set[5]
+        goal.angles.joint7 = angles_set[6]
+
+        self.joint_action_client.send_goal(goal)
 
     def home_arm_kinova(self):
         """Takes the arm to the kinova default home if possible
         """
-        self.arm.set_named_target("Home")
+        # self.arm.set_named_target("Home")
+        angles_set = map(np.deg2rad,[629.776062012,150.076568694,-0.13603515923,29.8505859375,0.172727271914,212.423721313,269.743164062])
+        self.arm.clear_pose_targets()
+        try:
+            self.arm.set_joint_value_target(angles_set)
+        except MoveItCommanderException as e:
+            pass #stupid bug in movegroupcommander wrapper throws an exception when trying to set joint angles
         try:
             self.arm.go()
             return "successful home"
         except:
             return "failed to home"
+
+    
 
     def move_fingers(self, finger1_pct, finger2_pct, finger3_pct):
         finger_max_turn = 6800
@@ -307,15 +346,20 @@ class DaArmServer:
         place_y_threshold = message.target_y_tolerance
         self.move_block(block_id,pick_x,pick_y,pick_x_threshold,pick_y_threshold,place_x,place_y,place_x_threshold,place_y_threshold,message.block_size)
 
-    def handle_pick_failure(self):
+    def handle_pick_failure(self,exception):
         rospy.loginfo("Pick failed, going home.")
         self.open_gripper()
-        self.home_arm_kinova()
+        self.home_arm()
+        raise exception
 
 
-    def handle_place_failure(self,safe_zone,block_size):
+    def handle_place_failure(self,safe_zone,block_size,exception):
         #should probably figure out if I'm holding the block first so it doesn't look weird
         #figure out how to drop the block somewhere safe
+        #pass none and none if you are certain you haven't picked up a block yet
+        if safe_zone is None and block_size is None:
+            self.home_arm()
+            raise exception
         rospy.loginfo("HANDLING PLACE FAILURE")
         block_response = json.loads(self.get_block_state('tuio').tui_state)
         current_block_state = block_response
@@ -328,7 +372,8 @@ class DaArmServer:
         except Exception as e:
             rospy.loginfo("ERROR: Cannot panic place the block! Get ready to catch it!")
             self.open_gripper()
-        self.home_arm_kinova()
+        self.home_arm()
+        raise exception
 
     def get_candidate_blocks(self,block_id,pick_x,pick_y,pick_x_tolerance,pick_y_tolerance):
         block_response = json.loads(self.get_block_state('tuio').tui_state)
@@ -360,10 +405,10 @@ class DaArmServer:
         # check for a drop location before trying to pick, do this before checking source to prevent cases where we go for a block user 
         # moved while we are checking for a drop location
         drop_location = self.calculate_drop_location(
-            place_x, place_y, place_x_tolerance, place_y_tolerance, current_block_state, block_size, num_attempts=1000)
+            place_x, place_y, place_x_tolerance, place_y_tolerance, current_block_state, block_size, num_attempts=2000)
 
         if drop_location == None:
-            raise Exception("no room in the target zone to drop the block")
+             self.handle_place_failure(None,None,Exception("no room in the target zone to drop the block"))
 
         for block in current_block_state:
             print(block, self.check_block_bounds(block['x'], block['y'], pick_x, pick_y, pick_x_tolerance, pick_y_tolerance))
@@ -389,16 +434,22 @@ class DaArmServer:
                     rospy.loginfo("pick failed and trying again..."+str(e))
                 else:
                     rospy.loginfo("pick failed and out of attempts..."+str(e))
-                    self.handle_pick_failure()
-                    raise(e)
-
+                    self.handle_pick_failure(e)
+                    
+        if safe_zone == None:
+            if self.safe_zone == None:
+                safe_zone = [{'x':pick_x,'y':pick_y},{'x_tolerance':pick_x_tolerance,'y_tolerance':pick_y_tolerance}]
+            else:
+                safe_zone = self.safe_zone
         
         # calculate drop location
         
         block_response = json.loads(self.get_block_state('tuio').tui_state)
         current_block_state = block_response
         drop_location = self.calculate_drop_location(
-            place_x, place_y, place_x_tolerance, place_y_tolerance, current_block_state, block_size, num_attempts=1000)
+            place_x, place_y, place_x_tolerance, place_y_tolerance, current_block_state, block_size, num_attempts=2000)
+        if drop_location == None:
+            self.handle_place_failure(safe_zone, block_size, Exception("no room in the target zone to drop the block"))
         rospy.loginfo("tuio drop"+str(drop_location))
         for i in range(place_tries):
             try:
@@ -412,13 +463,9 @@ class DaArmServer:
                 else:
                     rospy.loginfo("place failed and out of attempts..."+str(e))
                     # check to see if we've defined a safe zone to drop the blocks
-                    if safe_zone == None:
-                        if self.safe_zone == None:
-                            safe_zone = [{'x':pick_x,'y':pick_y},{'x_tolerance':pick_x_tolerance,'y_tolerance':pick_y_tolerance}]
-                        else:
-                            safe_zone = self.safe_zone
-                    self.handle_place_failure(safe_zone,block_size)
-                    raise(e)
+                    
+                    self.handle_place_failure(safe_zone,block_size,e)
+                    
         # assume success if we made it this far
         self.move_block_server.set_succeeded(MoveBlockResult(drop_location))
         
@@ -432,13 +479,13 @@ class DaArmServer:
         return False
 
     # calculate the best location to drop the block
-    def calculate_drop_location(self, x, y, x_threshold, y_threshold, blocks, block_size, num_attempts=10):
+    def calculate_drop_location(self, x, y, x_threshold, y_threshold, blocks, block_size, num_attempts=1000):
         attempt = 0
         x_original, y_original = x, y
         while(attempt < num_attempts):
             valid = True
             for block in blocks:
-                if self.check_block_bounds(block['x'], block['y'], x, y, block_size, block_size):
+                if self.check_block_bounds(block['x'], block['y'], x, y, 0.8*block_size, block_size):
                     valid = False
                     break
             if valid:
@@ -448,7 +495,7 @@ class DaArmServer:
                 y = random.uniform(y_original - y_threshold, y_original + y_threshold)
             attempt += 1
         #if none found in num_attempts, return none
-        except "Couldn't find a place to drop the block in the given point, bounds configuration afer "+num_attempts+" tries"
+        return None
 
     # candidates should have more than one element in it
     @staticmethod
@@ -526,13 +573,13 @@ class DaArmServer:
         #we'll do a very lenient check, this is to find failures, not error
         #also only checking position, not orientation
         rospy.loginfo("checking pose:"+str(target_pose)+str(cur_pose))
-        if target_pose.pose.position.x - cur_pose.pose.position.x > self.GOAL_TOLERANCE*2:
+        if np.abs(target_pose.pose.position.x - cur_pose.pose.position.x) > self.GOAL_TOLERANCE*2:
             print("x error too far")
             return False
-        if target_pose.pose.position.y - cur_pose.pose.position.y > self.GOAL_TOLERANCE*2:
+        if np.abs(target_pose.pose.position.y - cur_pose.pose.position.y) > self.GOAL_TOLERANCE*2:
             print("y error too far")
             return False
-        if target_pose.pose.position.z - cur_pose.pose.position.z > self.GOAL_TOLERANCE*2:
+        if np.abs(target_pose.pose.position.z - cur_pose.pose.position.z) > self.GOAL_TOLERANCE*2:
             print("z error too far")
             return False
         print("tolerable error")
@@ -695,7 +742,10 @@ class DaArmServer:
             position = Point(location.x, location.y, self.grasp_height)
             self.move_arm_to_pose(position, orientation, delay=0, action_server=action_server)
         except Exception as e:
-            self.lower_table()
+            current_pose = self.arm.get_current_pose()
+            if current_pose.pose.position.z - self.cruising_height < 0:
+                self.move_z_absolute(self.crusing_height)
+            self.raise_table()
             raise(e) #problem because sometimes we get exception e.g. if we're already there
             # and it will skip the close if so.
         if action_server:
@@ -703,15 +753,18 @@ class DaArmServer:
         
         self.close_gripper()
         self.move_z_absolute(self.cruising_height)
+        #try to wait until we're up to check grasp
+        rospy.sleep(0.5)
 
         if check_grasp is True:
             if(self.check_grasp() is False):
-                print("Grasp failed!")
-                self.lower_table()
+                print("Grasp failed!") 
+                self.raise_table()
                 raise(Exception("grasp failed!"))
             # for now, but we want to check finger torques
             # for i in range(retry_attempts):
             #     self.move_z(0.3)
+        self.raise_table()
         
         rospy.sleep(delay)
 
@@ -726,19 +779,23 @@ class DaArmServer:
         rospy.loginfo("PLACE POSITION: "+str(position)+"(DROP HEIGHT: "+str(self.drop_height))
         orientation = self.get_grasp_orientation(position)
         try:
-            self.raise_table()
+            self.raise_table() # only do this as a check in case it isn't already raised
             self.move_arm_to_pose(position, orientation, delay=0, action_server=action_server)
             self.lower_table()
             self.move_z_absolute(self.drop_height)
         except Exception as e:
-            self.lower_table()
+            current_pose = self.arm.get_current_pose()
+            if current_pose.pose.position.z - self.cruising_height < 0:
+                self.move_z_absolute(self.drop_height)
+            self.raise_table()
             raise(e)
         if action_server:
             action_server.publish_feedback()
         self.open_gripper()
         self.move_z_absolute(self.cruising_height)
+        self.raise_table()
         self.close_gripper()
-
+        
     def stop_motion(self, home=False, pause=False):
         rospy.loginfo("STOPPING the ARM")
         # cancel the moveit_trajectory
