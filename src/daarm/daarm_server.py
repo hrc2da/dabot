@@ -21,7 +21,7 @@ from dabot.msg import CalibrateAction, CalibrateFeedback, CalibrateResult, \
 from dabot.msg import CalibrationParams
 from dabot.srv import TuiState, TuiStateRequest, ArmCommand, ArmCommandResponse
 from dautils import get_ros_param, get_arm_bounds, get_tuio_bounds, tuio_to_ratio, tuio_to_arm
-from geometry_msgs.msg import Point, Quaternion, PoseStamped
+from geometry_msgs.msg import Point, Quaternion, PoseStamped, WrenchStamped
 from std_msgs.msg import String
 from kinova_msgs.msg import *
 from kinova_msgs.srv import *
@@ -38,6 +38,7 @@ class DaArmServer:
     """The basic, design problem/tui agnostic arm server
     """
     gestures = {}
+    pointing_height = 0.06
     grasp_height = 0.05
     drop_height = 0.07
     cruising_height = 0.1
@@ -72,7 +73,7 @@ class DaArmServer:
         self.init_action_servers()
 
     def init_scene(self):
-        world_objects = ["table", "tui", "monitor", "overHead", "wall", "farWall", "backWall", "blockProtector", "rearCamera"]
+        world_objects = ["table", "tui", "monitor", "overHead", "wall", "farWall", "frontWall", "backWall", "blockProtector", "rearCamera"]
         self.robot = RobotCommander()
         self.scene = PlanningSceneInterface()
         for obj in world_objects:
@@ -98,6 +99,10 @@ class DaArmServer:
         self.farWallPose.header.frame_id = self.robot.get_planning_frame()
         self.farWallPose.pose.position = Point(0.9, -0.343, -0.3048)
         self.farWallDimension = (0.6096, 2, 3.35)
+        self.frontWallPose = PoseStamped()
+        self.frontWallPose.header.frame_id = self.robot.get_planning_frame()
+        self.frontWallPose.pose.position = Point(0.0056,-0.85,-0.51)
+        self.frontWallDimension = (1,0.15,4)
         self.backWallPose = PoseStamped()
         self.backWallPose.header.frame_id = self.robot.get_planning_frame()
         self.backWallPose.pose.position = Point(0.0056,0.55,-0.51)
@@ -112,6 +117,7 @@ class DaArmServer:
         self.scene.add_box("farWall", self.farWallPose, self.farWallDimension)
         self.scene.add_box("overHead", self.overHeadPose, self.overHeadDimension)
         self.scene.add_box("backWall", self.backWallPose, self.backWallDimension)
+        self.scene.add_box("frontWall", self.frontWallPose, self.frontWallDimension)
         self.scene.add_box("rearCamera", self.rearCameraPose, self.rearCameraDimension)
     def raise_table(self):
         #raises the table obstacle to protect blocks on the table during transport
@@ -127,6 +133,7 @@ class DaArmServer:
             self.grasp_height = get_ros_param("GRASP_HEIGHT", "Grasp height defaulting to 0.01")
             self.drop_height = get_ros_param("DROP_HEIGHT", "Drop height defaulting to 0.07")
             self.cruising_height = get_ros_param("CRUISING_HEIGHT", "Cruising height defaulting to 0.1")
+            self.pointing_height = get_ros_param("POINT_HEIGHT", "Pointing height defaulting to 0.06")
         except ValueError as e:
             rospy.loginfo(e)
     def handle_param_update(self, message):
@@ -159,6 +166,12 @@ class DaArmServer:
             '/move_group/status', GoalStatusArray, self.update_move_group_status)
         self.move_it_feedback_subscriber = rospy.Subscriber(
              '/move_group/feedback', MoveGroupActionFeedback, self.update_move_group_state)
+
+         #Topic for getting joint torques
+        rospy.Subscriber('/j2s7s300_driver/out/joint_torques', JointAngles,self.monitorJointTorques)
+        #Topic for getting cartesian force on end effector
+        rospy.Subscriber('/j2s7s300_driver/out/tool_wrench', geometry_msgs.msg.WrenchStamped, self.monitorToolWrench)
+
 
     def init_action_servers(self):
         self.calibration_server = actionlib.SimpleActionServer(
@@ -291,6 +304,22 @@ class DaArmServer:
         except:
             return "failed to home"
 
+    # This callback function monitors the Joint Torques and stops the current execution if the Joint Torques exceed certain value
+    def monitorJointTorques(self,torques):
+        if abs(torques.joint1) > 1:
+            return
+            #self.emergency_stop() #Stop arm driver
+            #rospy.sleep(1.0)
+            #self.group.stop() #Stop moveit execution
+
+    # This callback function monitors the Joint Wrench and stops the current
+    # execution if the Joint Wrench exceeds certain value
+    def monitorToolWrench(self, wrenchStamped):
+        return
+        #toolwrench = abs(wrenchStamped.wrench.force.x**2 + wrenchStamped.wrench.force.y**2 + wrenchStamped.wrench.force.z**2)
+        ##print toolwrench
+        #if toolwrench > 100:
+        #    self.emergency_stop()  # Stop arm driver
     
 
     def move_fingers(self, finger1_pct, finger2_pct, finger3_pct):
@@ -390,7 +419,7 @@ class DaArmServer:
         return candidate_blocks
 
     def move_block(self,block_id,pick_x,pick_y,pick_x_tolerance,pick_y_tolerance,place_x,place_y,
-        place_x_tolerance,place_y_tolerance,block_size = None, safe_zone = None, pick_tries=2, place_tries=1):
+        place_x_tolerance,place_y_tolerance,block_size = None, safe_zone = None, pick_tries=2, place_tries=1, point_at_block = True):
         
         if block_size is None:
             block_size = get_ros_param('DEFAULT_BLOCK_SIZE')
@@ -410,6 +439,7 @@ class DaArmServer:
         if drop_location == None:
              self.handle_place_failure(None,None,Exception("no room in the target zone to drop the block"))
 
+        # here we are actually building a set of candidate blocks to pick
         for block in current_block_state:
             print(block, self.check_block_bounds(block['x'], block['y'], pick_x, pick_y, pick_x_tolerance, pick_y_tolerance))
             if block['id'] == block_id and self.check_block_bounds(block['x'], block['y'], pick_x, pick_y, pick_x_tolerance, pick_y_tolerance):
@@ -424,6 +454,22 @@ class DaArmServer:
             pick_location = Point(candidate_blocks[0]['x'], candidate_blocks[0]['y'],0)
         else:
             pick_location = Point(*self.find_most_isolated_block(candidate_blocks, current_block_state))
+
+        if point_at_block == True:
+            try:
+                arm_pick_location = tuio_to_arm(pick_location.x, pick_location.y, get_tuio_bounds(), get_arm_bounds())
+                arm_drop_location = tuio_to_arm(drop_location.x, drop_location.y, get_tuio_bounds(), get_arm_bounds())
+                self.close_gripper()
+                self.point_at_block(location=Point(arm_pick_location[0], arm_pick_location[1], 0))
+                self.point_at_block(location=Point(arm_drop_location[0], arm_drop_location[1], 0))
+                self.home_arm()
+            except Exception as e:
+                rospy.loginfo(str(e))
+                rospy.loginfo("failed trying to point at block. giving up.")
+                self.home_arm()
+            self.move_block_server.set_succeeded(MoveBlockResult(drop_location))
+            return
+        
         for i in range(pick_tries):
             try:
                 arm_pick_location = tuio_to_arm(pick_location.x, pick_location.y, get_tuio_bounds(), get_arm_bounds())
@@ -786,7 +832,7 @@ class DaArmServer:
         except Exception as e:
             current_pose = self.arm.get_current_pose()
             if current_pose.pose.position.z - self.cruising_height < 0:
-                self.move_z_absolute(self.drop_height)
+                self.move_z_absolute(self.cruising_height)
             self.raise_table()
             raise(e)
         if action_server:
@@ -795,6 +841,32 @@ class DaArmServer:
         self.move_z_absolute(self.cruising_height)
         self.raise_table()
         self.close_gripper()
+
+    def point_at_block(self, location, delay=0, action_server=None):
+        # go to a spot an drop a block
+        # if check_grasp is true, it will check torque on gripper and fail if not holding a block
+        # print('Position: ', position)
+        current_pose = self.arm.get_current_pose()
+        if current_pose.pose.position.z - self.cruising_height < -.02: # if I'm significantly below cruisng height, correct
+            self.move_z_absolute(self.cruising_height)
+        position = Point(location.x, location.y, self.cruising_height)
+        rospy.loginfo("PLACE POSITION: "+str(position)+"(DROP HEIGHT: "+str(self.drop_height))
+        orientation = self.get_grasp_orientation(position)
+        try:
+            self.raise_table() # only do this as a check in case it isn't already raised
+            self.move_arm_to_pose(position, orientation, delay=0, action_server=action_server)
+            self.lower_table()
+            self.move_z_absolute(self.pointing_height)
+            self.move_z_absolute(self.cruising_height)
+        except Exception as e:
+            current_pose = self.arm.get_current_pose()
+            if current_pose.pose.position.z - self.cruising_height < 0:
+                self.move_z_absolute(self.cruising_height)
+            self.raise_table()
+            raise(e)
+        if action_server:
+            action_server.publish_feedback()
+        self.raise_table()
         
     def stop_motion(self, home=False, pause=False):
         rospy.loginfo("STOPPING the ARM")
